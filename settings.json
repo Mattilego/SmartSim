@@ -1,0 +1,9 @@
+{
+    "simc_path": "C:/Users/ÄGARE/Programming/WorldOfWarcraft/SmartSim/simc.exe",
+    "batch_size": 100,
+    "target_absolute_error": 0.5,
+    "target_relative_error": 0.000000001,
+    "confidence": 0.95,
+    "gems": {},
+    "enchants": {}
+}

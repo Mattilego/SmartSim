@@ -1,0 +1,83 @@
+# Custom APL
+actions.precombat=/
+actions.precombat+=/arcane_intellect
+actions.precombat+=/variable,name=hardcast_aoe_threshold,value=4
+actions.precombat+=/variable,name=hardcast_aoe_threshold_low,value=11
+actions.precombat+=/variable,name=hot_streak_aoe_threshold,value=3
+# Timing alignment variables (in seconds)
+actions.precombat+=/variable,name=combustion_meteor_delay,value=1
+actions.precombat+=/variable,name=meteor_combustion_delay,value=25
+actions.precombat+=/snapshot_stats
+actions.precombat+=/pyroblast
+actions=/
+actions+=/variable,name=hold_hot_streak,value=10-(((fight_remains-10-cooldown.combustion.remains)%%62)%floor(fight_remains-10-cooldown.combustion.remains)%62)
+#Flame Cap consumable, requires "shirt=flame_cap,use=21intellect_60dur_180cd" in profile
+actions+=/use_item,name=flame_cap,if=cooldown.combustion.remains<40,use_off_gcd=1
+actions+=/potion,if=buff.combustion.up|(target.health.pct>90&talent.firestarter.enabled)|target.time_to_die<25,use_off_gcd=1
+actions+=/combustion,if=buff.hot_streak.up&(!buff.combustion.up)&target.health.pct<=90&(!talent.meteor.enabled|(action.meteor.in_flight_remains<0.1&action.meteor.in_flight_remains>0)|(cooldown.meteor.remains>variable.combustion_meteor_delay&action.meteor.in_flight_remains=0)),use_off_gcd=1,use_while_casting=1
+actions+=/use_items,if=buff.combustion.up|(target.health.pct>90&talent.firestarter.enabled),use_off_gcd=1,use_while_casting=1
+# --- RACIAL ABILITIES ---
+actions+=/blood_fury,if=buff.combustion.up|(target.health.pct>90&talent.firestarter.enabled),use_off_gcd=1,use_while_casting=1
+actions+=/berserking,if=buff.combustion.up|(target.health.pct>90&talent.firestarter.enabled),use_off_gcd=1,use_while_casting=1
+actions+=/fireblood,if=buff.combustion.up|(target.health.pct>90&talent.firestarter.enabled),use_off_gcd=1,use_while_casting=1
+actions+=/ancestral_call,if=buff.combustion.up|(target.health.pct>90&talent.firestarter.enabled),use_off_gcd=1,use_while_casting=1
+actions+=/use_item,name=pendant_of_the_violet_eye,if=cooldown.combustion.remains<8,use_off_gcd=1,use_while_casting=1
+actions+=/use_item,name=meteorite_crystal,if=cooldown.combuastion.remains<4,use_off_gcd=1,use_while_casting=1
+
+actions+=/invoke_external_buff,name=power_infusion,if=!buff.power_infusion.up&((target.health.pct>90&&talent.firestarter.enabled)|(cooldown.combustion.remains<3&buff.hot_streak.up)),use_off_gcd=1,use_while_casting=1
+# ------------------------
+actions+=/meteor,if=cooldown.meteor.ready&(((buff.combustion.up&buff.combustion.remains>2))|cooldown.combustion.remains>variable.meteor_combustion_delay|(cooldown.combustion.remains<2&buff.hot_streak.up&!(target.health.pct>90&talent.firestarter.enabled)))
+actions+=/flamestrike,if=buff.hot_streak.up&active_enemies>=variable.hot_streak_aoe_threshold&!(cooldown.combustion.remains<variable.hold_hot_streak&!(target.health.pct>90&talent.firestarter.enabled))
+actions+=/pyroblast,if=buff.hot_streak.up&!(cooldown.combustion.remains<variable.hold_hot_streak&!(target.health.pct>90&talent.firestarter.enabled))
+actions+=/fire_blast,if=cooldown.fire_blast.charges>=2,use_off_gcd=1,use_while_casting=1
+actions+=/fire_blast,if=buff.heating_up.up&!buff.hot_streak.up&!(action.scorch.executing&buff.heating_up.up),use_off_gcd=1,use_while_casting=1
+actions+=/flamestrike,if=((((target.health.pct<30&(talent.scorch.enabled|talent.scald.enabled))|buff.heat_shimmer.up)&!buff.heating_up.up&active_enemies>=variable.hardcast_aoe_threshold_low)|(!((target.health.pct<30&(talent.scorch.enabled|talent.scald.enabled))|buff.heat_shimmer.up)&active_enemies>=variable.hardcast_aoe_threshold))
+actions+=/scorch,if=target.health.pct<30|buff.heat_shimmer.up
+actions+=/fireball
+
+#shirt=flame_cap,use=21spi_60dur_180cd
+#potion=volcanic_potion
+#food=severed_sagefish_head
+#flask=flask_of_distilled_wisdom
+#temporary_enchant=main_hand:superior_wizard_oil
+
+temporary_enchant=disabled
+potion=disabled
+flask=disabled
+food=disabled
+augmentation=disabled
+
+override.spell_data=spell.108853.spell_level=30
+override.player.spell_data=spell.2825.spell_level=1
+override.player.spell_data=effect.856.base_value=15
+override.player.spell_data=spell.10060.spell_level=1
+
+
+profileset."Default gale"+=trinket2=gale_of_shadows,id=56462,bonus_id=6652/6710,ilevel=33,drop_level=30,content_tuning=2671
+
+# Simulation Options
+desired_targets=1
+max_time=300
+fixed_time=1
+enemy=Fluffy_Pillow
+target_level+=3
+#enemy_custom_health_timeline=90:0.05/30:0.85
+override.allow_flasks=0
+override.allow_food=0
+override.allow_potions=0
+override.allow_augmentations=0
+optimal_raid=0
+override.bloodlust=0
+override.arcane_intellect=0
+override.power_word_fortitude=0
+override.battle_shout=0
+override.mystic_touch=0
+override.chaos_brand=0
+#override.windfury_totem=1
+override.mark_of_the_wild=0
+override.hunters_mark=0
+override.bleeding=0
+report_details=0
+single_actor_batch=1
+calculate_scale_factors=0
+optimize_expressions=1

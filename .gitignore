@@ -1,0 +1,8 @@
+*.json
+*.simc
+*.exe
+
+!profile.simc
+!options.simc
+!settings.json
+!**/profile_0.simc
