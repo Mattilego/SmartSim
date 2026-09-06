@@ -24,7 +24,6 @@ actions+=/ancestral_call,if=buff.combustion.up|(target.health.pct>90&talent.fire
 actions+=/use_item,name=pendant_of_the_violet_eye,if=cooldown.combustion.remains<8,use_off_gcd=1,use_while_casting=1
 actions+=/use_item,name=meteorite_crystal,if=cooldown.combuastion.remains<4,use_off_gcd=1,use_while_casting=1
 
-actions+=/invoke_external_buff,name=power_infusion,if=!buff.power_infusion.up&((target.health.pct>90&&talent.firestarter.enabled)|(cooldown.combustion.remains<3&buff.hot_streak.up)),use_off_gcd=1,use_while_casting=1
 # ------------------------
 actions+=/meteor,if=cooldown.meteor.ready&(((buff.combustion.up&buff.combustion.remains>2))|cooldown.combustion.remains>variable.meteor_combustion_delay|(cooldown.combustion.remains<2&buff.hot_streak.up&!(target.health.pct>90&talent.firestarter.enabled)))
 actions+=/flamestrike,if=buff.hot_streak.up&active_enemies>=variable.hot_streak_aoe_threshold&!(cooldown.combustion.remains<variable.hold_hot_streak&!(target.health.pct>90&talent.firestarter.enabled))
@@ -52,16 +51,13 @@ override.player.spell_data=spell.2825.spell_level=1
 override.player.spell_data=effect.856.base_value=15
 override.player.spell_data=spell.10060.spell_level=1
 
-
-profileset."Default gale"+=trinket2=gale_of_shadows,id=56462,bonus_id=6652/6710,ilevel=33,drop_level=30,content_tuning=2671
-
 # Simulation Options
 desired_targets=1
 max_time=300
 fixed_time=1
 enemy=Fluffy_Pillow
 target_level+=3
-#enemy_custom_health_timeline=90:0.05/30:0.85
+enemy_custom_health_timeline=90:0.05/30:0.80
 override.allow_flasks=0
 override.allow_food=0
 override.allow_potions=0
@@ -77,7 +73,7 @@ override.chaos_brand=0
 override.mark_of_the_wild=0
 override.hunters_mark=0
 override.bleeding=0
-report_details=0
+report_details=1
 single_actor_batch=1
 calculate_scale_factors=0
 optimize_expressions=1

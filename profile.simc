@@ -1,29 +1,50 @@
-mage=Foxÿlego
+# All-time - Mage - Fire
+mage="Fateccaster"
 level=30
-race=mechagnome
-region=eu
-server=thunderhorn
+race=nightborne
+region=us
+server=thrall
 role=spell
 professions=enchanting=60/inscription=25
 spec=fire
 talents=C8DAche08tHz49KSVf7iKFnyuBgxAmZkBAAAAAAAAAwMDYMDAAAAAwGYGAAAAGDLAAAAMAA
 
+# Cowl of Light's Purity (44)
+head=,ilevel=44,id=34339,gem_id=68780/213743,bonus_id=9037,drop_level=30
+# Bromach's Disentombed Locket (33)
+neck=,ilevel=33,id=193809,enchant_id=5890,gem_id=213488/32196/32196,bonus_id=9156/6652/9477/8782,drop_level=30
+# Amice of Inconceivable Horror (43)
+shoulder=,ilevel=43,id=46068,enchant_id=3838,gem_id=32196/32196,bonus_id=9037,drop_level=30
+# Tattered Cape of Antonidas (44)
+back=,ilevel=44,id=34242,enchant_id=3243,gem_id=32196,bonus_id=9037,drop_level=30
+# Robe of Eternal Light (44)
+chest=,ilevel=44,id=34365,enchant_id=6625,gem_id=32196/32196/32196,bonus_id=9037,drop_level=30
+# Bracers of the Tempest (44)
+wrist=,ilevel=44,id=34447,enchant_id=2326,gem_id=32196,bonus_id=9037,drop_level=30
+# Handguards of the Dawn (44)
+hands=,ilevel=44,id=34342,enchant_id=2322,gem_id=32196/32196,bonus_id=9037,drop_level=30
+# Belt of Blasting (40)
+waist=,ilevel=40,id=30038,gem_id=32196/32196/32196,bonus_id=9035,drop_level=30
+# Leggings of Calamity (44)
+legs=,ilevel=44,id=34181,enchant_id=6541,gem_id=32196/32196/32196,bonus_id=9037,drop_level=30
+# Boots of Fiery Resolution (43)
+feet=,ilevel=43,id=45135,enchant_id=4069,gem_id=32196/32196,bonus_id=9043,drop_level=30
+# Signet of the False Accuser (33)
+finger1=,ilevel=33,id=178824,enchant_id=6110,gem_id=213470/32196,bonus_id=6710/10386/6652/10879/10396,drop_level=30
+# Stitchflesh's Misplaced Signet (33)
+finger2=,ilevel=33,id=178736,enchant_id=6109,gem_id=32196/32196,drop_level=30
+# Gale of Shadows (33)
+trinket1=,ilevel=33,id=56462,bonus_id=6652/6710,drop_level=30
+# Solace of the Fallen (45)
+trinket2=,ilevel=45,id=47432,bonus_id=9047,drop_level=30
+# Mag'hari Chieftain's Staff (45)
+2_hand=,ilevel=45,id=51898,enchant_id=2669,gem_id=32196/32196/32196,bonus_id=9049,drop_level=30
 
-head=cowl_of_lights_purity,id=34339,bonus_id=9037,ilevel=44,gem_id=68780/213743,content_tuning=1015
-neck=star_of_mystaria,id=12103,bonus_id=9037/13750,ilevel=47,gem_id=32196,enchant_id=5890,content_tuning=1015
-shoulders=amice_of_inconceivable_horror,id=46068,bonus_id=9037,ilevel=43,gem_id=40133/40133,enchant_id=3838,content_tuning=1015
-back=tattered_cape_of_antonidas,id=34242,bonus_id=9037,ilevel=44,gem_id=32196,enchant_id=3243,content_tuning=1015
-chest=robe_of_eternal_light,id=34365,bonus_id=9037,ilevel=44,gem_id=32196/32196/32196,enchant_id=6625,content_tuning=1735
-wrists=bracers_of_the_tempest,id=34447,bonus_id=9037,ilevel=44,gem_id=213485,enchant_id=2326,content_tuning=1015
-hands=handguards_of_the_dawn,id=34342,bonus_id=9037,ilevel=44,gem_id=40133/40133,enchant_id=2322,content_tuning=1015
-waist=belt_of_blasting,id=30038,bonus_id=9035,ilevel=40,gem_id=32196/32196/32196,content_tuning=1735
-legs=pantaloons_of_calming_strife,id=34170,bonus_id=9037,ilevel=44,gem_id=32196/32196/32196,enchant_id=6541,content_tuning=1015
-feet=boots_of_fiery_resolution,id=45135,bonus_id=9043,ilevel=43,gem_id=32196/32196,enchant_id=4069,content_tuning=1020
-finger1=band_of_the_abyssal_lord,id=150459,bonus_id=1808,ilevel=51,gem_id=32196,enchant_id=6109,content_tuning=1015
-finger2=emerald_flame_ring,id=18395,bonus_id=9037/13750,ilevel=47,gem_id=32196,enchant_id=6109,content_tuning=1015
-trinket1=gale_of_shadows,id=56462,bonus_id=6652/6710,ilevel=33,drop_level=30,content_tuning=2671
-trinket2=solace_of_the_fallen,id=47432,bonus_id=9047,ilevel=45,content_tuning=1988
-2_hand=maghari_chieftains_staff,id=51898,bonus_id=9049,ilevel=45,gem_id=40133/40133/40133,enchant_id=2669,content_tuning=1023
-main_hand=maghari_chieftains_staff,id=51898,bonus_id=9049,ilevel=45,gem_id=40133/40133/40133,enchant_id=2669,content_tuning=1023
-
-# head=cowl_of_lights_purity,id=34339,bonus_id=9037,ilevel=44,gem_id=25893/213743,content_tuning=1015
+# Vengeful Gladiator's Silk Cowl (44)
+# head=,ilevel=44,id=33758,gem_id=68780/213743,bonus_id=9357,drop_level=30
+# vengeful_gladiators_silk_amice (44)
+# shoulder=,ilevel=44,id=33757,enchant_id=3838,gem_id=32196/32196,bonus_id=9357,drop_level=30
+# Drape of the Messenger 43
+# back=,ilevel=43,id=46042,enchant_id=3243,gem_id=32196,bonus_id=9043,drop_level=30
+# 2_hand=,ilevel=45,id=51887,enchant_id=2669,gem_id=32196/32196/32196,bonus_id=9049,drop_level=30
+# legs=,ilevel=44,id=34170,enchant_id=6541,gem_id=32196/32196/32196,bonus_id=9037,drop_level=30

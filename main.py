@@ -20,12 +20,15 @@ CLASSES = [
     "monk", "paladin", "priest", "shaman", "rogue", "warlock", "warrior"
 ]
 SLOTS = [
-    "head", "neck", "shoulders", "back", "chest", "wrists",
+    "head", "neck", "shoulder", "back", "chest", "wrists",
     "hands", "waist", "legs", "feet",
     "finger1", "finger2", "trinket1", "trinket2",
     "main_hand", "off_hand", "1_hand", "2_hand"
 ]
 
+def get_item_id(item):
+    """Return the item ID from the fields, or None if absent."""
+    return item.get("fields", {}).get("id") if item else None
 # ---------- Cleanup Function ----------
 def cleanup_previous_runs(profile_dir="profiles"):
     """
@@ -190,32 +193,42 @@ def generate_gear_combinations(profile_data):
     finger_pool = collect_items_for_slot('finger1', profile_data) + collect_items_for_slot('finger2', profile_data)
     finger_combos = []
     if len(finger_pool) >= 2:
-        for (i, a), (j, b) in itertools.combinations(enumerate(finger_pool), 2):
-            if a["base"] == b["base"]:
-                continue
-            finger_combos.append(('finger1', a, 'finger2', b))
+        for i in range(len(finger_pool)):
+            for j in range(i+1, len(finger_pool)):
+                a, b = finger_pool[i], finger_pool[j]
+                if get_item_id(a) == get_item_id(b):
+                    continue
+                finger_combos.append(('finger1', a, 'finger2', b))
     else:
         f1 = collect_items_for_slot('finger1', profile_data) or [None]
         f2 = collect_items_for_slot('finger2', profile_data) or [None]
         for a in f1:
             for b in f2:
-                if a is None or b is None or a["base"] != b["base"]:
-                    finger_combos.append(('finger1', a, 'finger2', b))
+                if a is None or b is None:
+                    continue
+                if get_item_id(a) == get_item_id(b):
+                    continue
+                finger_combos.append(('finger1', a, 'finger2', b))
 
     trinket_pool = collect_items_for_slot('trinket1', profile_data) + collect_items_for_slot('trinket2', profile_data)
     trinket_combos = []
     if len(trinket_pool) >= 2:
-        for (i, a), (j, b) in itertools.combinations(enumerate(trinket_pool), 2):
-            if a["base"] == b["base"]:
-                continue
-            trinket_combos.append(('trinket1', a, 'trinket2', b))
+        for i in range(len(trinket_pool)):
+            for j in range(i+1, len(trinket_pool)):
+                a, b = trinket_pool[i], trinket_pool[j]
+                if get_item_id(a) == get_item_id(b):
+                    continue
+                trinket_combos.append(('trinket1', a, 'trinket2', b))
     else:
         t1 = collect_items_for_slot('trinket1', profile_data) or [None]
         t2 = collect_items_for_slot('trinket2', profile_data) or [None]
         for a in t1:
             for b in t2:
-                if a is None or b is None or a["base"] != b["base"]:
-                    trinket_combos.append(('trinket1', a, 'trinket2', b))
+                if a is None or b is None:
+                    continue
+                if get_item_id(a) == get_item_id(b):
+                    continue
+                trinket_combos.append(('trinket1', a, 'trinket2', b))
 
     two_hand_pool = collect_items_for_slot('2_hand', profile_data)
     main_pool = collect_items_for_slot('main_hand', profile_data) + collect_items_for_slot('1_hand', profile_data)
@@ -229,7 +242,7 @@ def generate_gear_combinations(profile_data):
         for o in off_pool:
             if m is None or o is None:
                 continue
-            if m["base"] == o["base"]:
+            if get_item_id(m) == get_item_id(o):
                 continue
             weapon_combos.append(('main_hand', m, 'off_hand', o))
     if not weapon_combos:
@@ -482,80 +495,6 @@ def create_batch_with_deterministic(profile_file, settings_file, output_dir='pro
 
 import subprocess
 import json
-
-def run_simc_and_parse_results(batch_file, simc_path, json_output_file="results.json"):
-    """
-    Execute simc with the given batch file and JSON output.
-    Returns a list of dicts: [{'name': profileset_name, 'mean': dps_mean}, ...]
-    """
-    # Build command: simc batch_file.simc json=results.json
-    cmd = [simc_path, batch_file, f"json={json_output_file}"]
-    print(f"Running: {' '.join(cmd)}")
-    try:
-        # Run simc; it will write the JSON file
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
-    except subprocess.CalledProcessError as e:
-        print(f"SimC error (stderr):\n{e.stderr}")
-        raise RuntimeError("SimulationCraft execution failed") from e
-
-    # Parse the JSON results
-    with open(json_output_file, 'r', encoding='utf-8') as f:
-        data = json.load(f)
-
-    # The structure: data['sim']['profilesets']['results'] is a list of dicts with 'name' and 'mean'
-    results = data.get('sim', {}).get('profilesets', {}).get('results', [])
-    extracted = []
-    for entry in results:
-        # entry is like {'name': 'Combo 0', 'mean': 12345.6, ...}
-        extracted.append({
-            'name': entry.get('name'),
-            'mean': entry.get('mean')
-        })
-    return extracted
-
-def process_results(results):
-    """
-    Accepts a list of dicts: [{'name': 'Combo X', 'mean': dps}, ...]
-    Returns:
-      - unique_list: list of dicts with keys 'id', 'mean', 'iterations' (0), 'ucb' (Inf), 'lcb' (0)
-      - duplicate_list: list of dicts with keys 'id', 'same_as' (the id of the first combo with that mean)
-    """
-    seen_means = {}  # mean -> first combo id
-    unique_list = []
-    duplicate_list = []
-
-    for entry in results:
-        # Extract combo id from name (assumes name is "Combo <id>")
-        name = entry.get('name', '')
-        try:
-            combo_id = int(name.split()[1])  # "Combo 0" -> 0
-        except (IndexError, ValueError):
-            print(f"Warning: unexpected profileset name format: {name}")
-            continue
-
-        mean = entry.get('mean')
-        if mean is None:
-            print(f"Warning: no mean for {name}")
-            continue
-
-        if mean in seen_means:
-            # Duplicate mean
-            duplicate_list.append({
-                'id': combo_id,
-                'same_as': seen_means[mean]
-            })
-        else:
-            # First occurrence of this mean
-            seen_means[mean] = combo_id
-            unique_list.append({
-                'id': combo_id,
-                'mean': mean,
-                'iterations': 0,
-                'ucb': float('inf'),
-                'lcb': 0.0
-            })
-
-    return unique_list, duplicate_list
 
 def create_batch_file(iterations_dict, folder_name, profile_file, options_file, output_file):
     """
@@ -850,40 +789,56 @@ if __name__ == "__main__":
         sys.exit(1)
 
     all_ids = list(range(max_id + 1))
+    print(f"Total combos: {len(all_ids)} (including base profile 0)")
 
-    # Step 3: First batch (deterministic) to find unique DPS
-    first_iter = {i: -4 for i in all_ids}
-    batch_file1 = create_batch_file(first_iter, out_dir, profile_file, opts_file, "batch_det.simc")
-    raw_results1 = run_simc_and_parse_results(batch_file1, simc_path, "results_det.json")
-    unique_list, duplicate_list = process_results(raw_results1)
+    # ========== INITIAL BATCH IN CHUNKS ==========
+    # Split combos into smaller groups to avoid SimC memory overload.
+    CHUNK_SIZE = 200   # adjust based on your available memory; 200 is safe for ~1‑2GB per run
+    master_list = []
 
-    print(f"Found {len(unique_list)} unique DPS values, {len(duplicate_list)} duplicates.")
+    for chunk_start in range(0, len(all_ids), CHUNK_SIZE):
+        chunk_ids = all_ids[chunk_start:chunk_start + CHUNK_SIZE]
+        print(f"\n--- Initial batch for chunk {chunk_start//CHUNK_SIZE + 1}: {len(chunk_ids)} combos ---")
 
-    # Step 4: Second batch (50 iterations) on unique combos
-    unique_ids = [u['id'] for u in unique_list]
-    second_iter = {i: 50 for i in unique_ids}
-    batch_file2 = create_batch_file(second_iter, out_dir, profile_file, opts_file, "batch_50.simc")
-    raw_results2 = run_simc_and_parse_results(batch_file2, simc_path, "results_50.json")
-    result_map = {r['name']: r for r in raw_results2}
-    for u in unique_list:
-        name = f"Combo {u['id']}"
-        if name in result_map:
-            r = result_map[name]
-            u['mean'] = r['mean']
-            u['mean_stddev'] = r['mean_stddev']
-            u['stddev'] = r['mean_stddev'] * math.sqrt(u['iterations'])
-            u['ucb'], u['lcb'] = compute_ucb_lcb(u['mean'], u['mean_stddev'], confidence)
-        else:
-            print(f"Warning: no result for {name}")
+        # Build a batch file with 50 iterations per combo in this chunk
+        iter_dict = {cid: 50 for cid in chunk_ids}
+        batch_file = create_batch_file(
+            iter_dict, out_dir, profile_file, opts_file,
+            f"batch_initial_chunk_{chunk_start//CHUNK_SIZE + 1}.simc"
+        )
+        json_file = f"results_initial_chunk_{chunk_start//CHUNK_SIZE + 1}.json"
+        raw_results = run_simc_and_parse_results(batch_file, simc_path, json_file)
 
-    # Master list of all unique combos
-    master_list = unique_list
+        # Store results for each combo in the chunk
+        result_map = {r['name']: r for r in raw_results}
+        for cid in chunk_ids:
+            name = f"Combo {cid}"
+            if name in result_map:
+                r = result_map[name]
+                mean = r['mean']
+                mean_stddev = r['mean_stddev']
+                iterations = 50
+                stddev = mean_stddev * math.sqrt(iterations)
+                ucb, lcb = compute_ucb_lcb(mean, mean_stddev, confidence)
+                master_list.append({
+                    'id': cid,
+                    'mean': mean,
+                    'stddev': stddev,
+                    'mean_stddev': mean_stddev,
+                    'iterations': iterations,
+                    'ucb': ucb,
+                    'lcb': lcb
+                })
+            else:
+                print(f"Warning: no result for {name}")
+
+    # Now master_list contains all combos with initial stats.
+    # ========================================================
+
     survivor_ids = set()
-
-    # Start timing
     start_time = time.time()
-
     loop_count = 0
+
     while True:
         # 1. Find highest mean
         max_mean = max(u['mean'] for u in master_list)
@@ -905,7 +860,7 @@ if __name__ == "__main__":
 
         # --- Progress report before running this batch ---
         print_progress(loop_count, master_list, remaining, target_abs, target_rel,
-                       None, start_time)  # total_estimated_batches will be computed inside
+                       None, start_time)
 
         # 4. Run batch
         iter_dict = {cid: iters for cid, iters in allocations}
@@ -937,8 +892,7 @@ if __name__ == "__main__":
 
         loop_count += 1
 
-    # At this point, survivor_ids contains the IDs of combos that survived the final filter.
-    # Build final results for survivors and their duplicates.
+    # Build final results for survivors
     final_results = []
     for u in master_list:
         if u['id'] in survivor_ids:
@@ -953,30 +907,10 @@ if __name__ == "__main__":
                 'changes': descriptions.get(u['id'], 'unknown')
             })
 
-    # Add duplicates that map to survivors
-    for d in duplicate_list:
-        if d['same_as'] in survivor_ids:
-            same_entry = next((u for u in master_list if u['id'] == d['same_as']), None)
-            if same_entry:
-                final_results.append({
-                    'id': d['id'],
-                    'mean': same_entry['mean'],
-                    'stddev': same_entry['stddev'],
-                    'mean_stddev': same_entry['mean_stddev'],
-                    'iterations': same_entry['iterations'],
-                    'ucb': same_entry['ucb'],
-                    'lcb': same_entry['lcb'],
-                    'duplicate_of': d['same_as'],
-                    'changes': descriptions.get(d['id'], 'unknown')
-                })
-
     # Output final survivors
     print("\n=== Final Survivors ===")
     final_results.sort(key=lambda x: x['id'])
     for r in final_results:
-        if 'duplicate_of' in r:
-            print(f"Combo {r['id']}: mean={r['mean']:.2f} (same as Combo {r['duplicate_of']})")
-        else:
-            print(f"Combo {r['id']}: mean={r['mean']:.2f}, std={r['stddev']:.2f}, "
-                  f"iter={r['iterations']}, UCB={r['ucb']:.2f}, LCB={r['lcb']:.2f}")
+        print(f"Combo {r['id']}: mean={r['mean']:.2f}, std={r['stddev']:.2f}, "
+              f"iter={r['iterations']}, UCB={r['ucb']:.2f}, LCB={r['lcb']:.2f}")
         print(f"  Changes: {r['changes']}\n")

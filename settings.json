@@ -1,9 +1,19 @@
 {
-    "simc_path": "C:/Users/ÄGARE/Programming/WorldOfWarcraft/SmartSim/simc.exe",
-    "batch_size": 100,
-    "target_absolute_error": 0.5,
-    "target_relative_error": 0.000000001,
+    "simc_path": "/home/mattiasstrandberg/Programming/WoW/Simc/simc/build/simc",
+    "batch_size": 200,
+    "target_absolute_error": 1,
+    "target_relative_error": 0.00000005,
     "confidence": 0.95,
-    "gems": {},
+    "gems": {
+        "32196": {},
+        "213488": {"max": 1, "slots": ["neck"]},
+        "213485": {"max": 1, "slots": ["neck"]},
+        "213470": {"max": 1, "slots": ["neck"]},
+        "213476": {"max": 1, "slots": ["neck"]},
+        "35760": {"max": 4},
+        "32225": {"max": 4},
+        "68780": {"min":1, "max": 1, "meta": true, "slots": ["head"]},
+        "213743": {"min":1, "max": 1, "slots": ["head"]}
+    },
     "enchants": {}
 }
