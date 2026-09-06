@@ -266,29 +266,43 @@ def generate_gear_combinations(profile_data):
                     yield combo
 
 # ---------- Gem Placement ----------
-def get_sockets(gear_combo):
+def get_sockets(gear_combo, gems_settings):
     sockets = []
     for slot, item in gear_combo.items():
-        count = get_socket_count(item)
-        for idx in range(count):
-            sockets.append((slot, idx))
+        # Parse original gem IDs from the item's gem_id field
+        gem_ids = item["fields"].get("gem_id", "")
+        gem_list = gem_ids.split('/') if gem_ids else []
+        # For each socket index, determine if it originally contained a meta gem
+        for idx in range(len(gem_list)):
+            gid = gem_list[idx]
+            is_meta = False
+            if gid in gems_settings:
+                is_meta = gems_settings[gid].get("meta", False)
+            # If the socket is empty (no gem), we treat it as non-meta
+            sockets.append((slot, idx, is_meta))
     return sockets
 
 def generate_gem_placements(gear_combo, gems_settings):
-    sockets = get_sockets(gear_combo)
+    sockets = get_sockets(gear_combo, gems_settings)  # list of (slot, idx, is_meta)
     if not sockets:
         yield {}
         return
 
+    meta_sockets = [s for s in sockets if s[2]]
+    non_meta_sockets = [s for s in sockets if not s[2]]
+    total_meta_sockets = len(meta_sockets)
+    total_non_meta_sockets = len(non_meta_sockets)
+
     gem_ids = list(gems_settings.keys())
     if not gem_ids:
-        # No gem replacements specified; keep original gems
         yield {}
         return
 
+    # Separate meta and non‑meta gem IDs
+    meta_gem_ids = [gid for gid in gem_ids if gems_settings[gid].get("meta", False)]
+    non_meta_gem_ids = [gid for gid in gem_ids if not gems_settings[gid].get("meta", False)]
 
-    total_sockets = len(sockets)
-    gem_ids = list(gems_settings.keys())
+    # Generate count vectors for all gems (unchanged DFS)
     vectors = []
     def dfs(gem_idx, remaining, counts, meta_used):
         if gem_idx == len(gem_ids):
@@ -312,37 +326,62 @@ def generate_gem_placements(gear_combo, gems_settings):
             dfs(gem_idx + 1, remaining - cnt, counts, meta_used or (spec.get('meta', False) and cnt > 0))
         counts.pop(gid, None)
 
-    dfs(0, total_sockets, {}, False)
+    dfs(0, len(sockets), {}, False)
 
+    # For each vector, try to place gems respecting socket types
     for vec in vectors:
+        # Check feasibility: total meta gems <= meta_sockets, total non‑meta <= non_meta_sockets
+        total_meta = sum(cnt for gid, cnt in vec.items() if gems_settings[gid].get("meta", False))
+        total_non_meta = sum(cnt for gid, cnt in vec.items() if not gems_settings[gid].get("meta", False))
+        if total_meta > total_meta_sockets or total_non_meta > total_non_meta_sockets:
+            continue
+
+        # Build list of (gid, count) sorted: meta gems first, then by slot preference length
         items = [(gid, cnt) for gid, cnt in vec.items() if cnt > 0]
         items.sort(key=lambda x: (
             - (1 if gems_settings[x[0]].get('meta', False) else 0),
             - len(gems_settings[x[0]].get('slots', []))
         ))
-        socket_list = sockets[:]
+
+        # We'll place meta gems only on meta sockets, non‑meta only on non‑meta
+        # Separate sockets accordingly
+        meta_socket_pool = meta_sockets[:]   # list of (slot, idx, True)
+        non_meta_socket_pool = non_meta_sockets[:]
+
         placement = {}
         for gid, count in items:
             spec = gems_settings[gid]
+            is_meta = spec.get('meta', False)
             pref_slots = spec.get('slots', [])
-            if spec.get('meta', False):
-                pref_slots = ['head']
+            if is_meta:
+                pref_slots = ['head']  # meta gems only on head, but we rely on socket type
+                pool = meta_socket_pool
+            else:
+                pool = non_meta_socket_pool
+
             placed = 0
-            for slot, idx in socket_list[:]:
+            # Try preferred slots first
+            for slot, idx, _ in pool[:]:
                 if placed >= count:
                     break
                 if slot in pref_slots:
                     placement[(slot, idx)] = gid
-                    socket_list.remove((slot, idx))
+                    pool.remove((slot, idx, True if is_meta else False))
                     placed += 1
+            # If still need to place, use any remaining socket in the correct pool
             if placed < count:
-                for slot, idx in socket_list[:]:
+                for slot, idx, _ in pool[:]:
                     if placed >= count:
                         break
                     placement[(slot, idx)] = gid
-                    socket_list.remove((slot, idx))
+                    pool.remove((slot, idx, True if is_meta else False))
                     placed += 1
-        yield placement
+            if placed < count:
+                # Not enough sockets of the correct type – skip this vector
+                break
+        else:
+            # All gems placed successfully
+            yield placement
 
 # ---------- Enchant Combinations ----------
 def generate_enchant_combinations(gear_combo, enchants_settings):
@@ -425,11 +464,13 @@ def generate_profiles(profile_file, settings_file, output_dir):
 
                 # Write profile file only if there are changes
                 if new_pairs:
+                    prefix = f'profileset."Combo {combo_counter}"+='
+                    lines = [f"{prefix}{k}={v}" for k, v in sorted(new_pairs.items())]
                     desc_parts = [f"{k}={v}" for k, v in sorted(new_pairs.items())]
                     desc = "; ".join(desc_parts)
                     out_path = os.path.join(output_dir, f"profile_{combo_counter}.simc")
                     with open(out_path, 'w', encoding='utf-8') as f:
-                        f.write('\n'.join(f"{k}={v}" for k, v in sorted(new_pairs.items())) + '\n')
+                        f.write('\n'.join(lines) + '\n')
                     descriptions[combo_counter] = desc
                     combo_counter += 1
 
