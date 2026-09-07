@@ -648,7 +648,7 @@ import math
 def allocate_iterations(combos, batch_size, target_abs, target_rel):
     """
     Given a list of combo dicts (each with 'id', 'mean', 'ucb', 'iterations'),
-    allocate up to batch_size*100 iterations among combos that are not precise.
+    allocate up to batch_size*1000 iterations among combos that are not precise.
     Returns a list of (combo_id, iterations_to_run).
     """
     # Work on a copy so we don't modify the original
@@ -662,7 +662,7 @@ def allocate_iterations(combos, batch_size, target_abs, target_rel):
         for c in combos
     ]
 
-    total_iters = batch_size * 100
+    total_iters = batch_size * 1000
     allocated = 0
     allocations = []  # list of (id, additional_iterations)
 
@@ -691,15 +691,15 @@ def allocate_iterations(combos, batch_size, target_abs, target_rel):
 
         # Give it 100 iterations
         old_iter = best['iterations']
-        new_iter = old_iter + 100
+        new_iter = old_iter + 1000
         old_ucb = best['ucb']
         mean = best['mean']
         new_ucb = mean + (old_ucb - mean) * math.sqrt(old_iter / new_iter)
         best['ucb'] = new_ucb
         best['iterations'] = new_iter
-        allocated += 100
-        # Record that we allocated 100 iterations to this combo
-        allocations.append((best['id'], 100))
+        allocated += 1000
+        # Record that we allocated 1000 iterations to this combo
+        allocations.append((best['id'], 1000))
 
     # Combine allocations for the same combo
     combined = {}
@@ -727,33 +727,112 @@ def merge_stats(old_mean, old_stddev, old_iter, new_mean, new_stddev, new_iter):
 
 def estimate_remaining_batches(combos, batch_size, target_abs, target_rel):
     """
-    Estimate total additional iterations needed for all non‑precise combos.
-    Returns (total_iterations_needed, estimated_batches).
-    """
-    total_needed = 0.0
-    for c in combos:
-        width = (c['ucb'] - c['mean']) * 2  # ucb - lcb
-        # Effective target: stop when width <= target_abs OR width <= mean * target_rel
-        # i.e., width <= max(target_abs, mean * target_rel)
-        target_width = max(target_abs, c['mean'] * target_rel)
-        if width <= target_width:
-            continue
-        old_iter = c['iterations']
-        r = target_width / width if width > 0 else 1.0
-        if r >= 1.0:
-            continue
-        # Solve: width * sqrt(old_iter/(old_iter + x)) = target_width
-        x = old_iter * ((width / target_width) ** 2 - 1)
-        if x > 0:
-            total_needed += x
+    Estimate total additional iterations and number of full batches required,
+    simulating both precision improvement and elimination of dominated combos.
 
-    # Each batch can run batch_size * 100 iterations total (batch_size chunks of 100).
-    # Use ceil division.
-    if total_needed <= 0:
-        estimated_batches = 1
-    else:
-        estimated_batches = int(total_needed / (batch_size * 100)) + 1
-    return total_needed, estimated_batches
+    Parameters:
+        combos : list of dicts
+            Each dict must contain: 'id', 'mean', 'mean_stddev', 'iterations',
+            'ucb', 'lcb'. These are the *current remaining* combos (not dominated).
+        batch_size : int
+            Number of thousand iterations per batch.
+        target_abs : float
+            Absolute precision target (maximum interval width).
+        target_rel : float
+            Relative precision target (maximum interval width / mean).
+
+    Returns:
+        (total_iterations_needed, estimated_batches)
+    """
+    if not combos:
+        return 0, 0
+
+    # Maximum mean among all combos (constant throughout simulation)
+    max_mean = max(c['mean'] for c in combos)
+
+    # Determine the confidence factor from the first combo that has mean_stddev
+    factor = None
+    for c in combos:
+        if c.get('mean_stddev', 0) > 0:
+            factor = (c['ucb'] - c['mean']) / c['mean_stddev']
+            break
+    if factor is None:
+        factor = 1.96   # fallback (typical for 95% confidence)
+
+    max_batch_iters = batch_size * 1000
+
+    # Copy combos for simulation (mutate only these)
+    sim = []
+    for c in combos:
+        sim.append({
+            'id': c['id'],
+            'mean': c['mean'],
+            'mean_stddev': c['mean_stddev'],
+            'iterations': c['iterations'],
+            'ucb': c['ucb'],
+            'lcb': c['lcb']
+        })
+
+    total_added = 0
+    batches = 0
+
+    while True:
+        # 1. Active combos: those still not dominated (UCB >= max_mean)
+        active = [c for c in sim if c['ucb'] >= max_mean]
+        if not active:
+            break
+
+        # 2. Among active, which ones need more iterations? (not precise)
+        needs_iter = []
+        for c in active:
+            width = c['ucb'] - c['lcb']
+            if width > target_abs and (width / c['mean']) > target_rel:
+                needs_iter.append(c)
+
+        if not needs_iter:
+            # All active combos are precise – done
+            break
+
+        # 3. Start a new batch
+        budget = max_batch_iters
+        batches += 1
+
+        # Allocate within this batch
+        while budget > 0 and needs_iter:
+            # Pick the combo with highest UCB among those needing iterations
+            best = max(needs_iter, key=lambda c: c['ucb'])
+
+            add = 1000
+            if add > budget:
+                add = budget   # only for completeness (real code always adds 1000)
+
+            # Update statistics for the chosen combo
+            old_n = best['iterations']
+            new_n = old_n + add
+            old_se = best['mean_stddev']
+            new_se = old_se * (old_n / new_n) ** 0.5
+            best['mean_stddev'] = new_se
+            best['iterations'] = new_n
+            best['ucb'] = best['mean'] + factor * new_se
+            best['lcb'] = best['mean'] - factor * new_se
+
+            total_added += add
+            budget -= add
+
+            # Re‑evaluate active set: some combos may now be dominated (UCB < max_mean)
+            active = [c for c in sim if c['ucb'] >= max_mean]
+            needs_iter = []
+            for c in active:
+                width = c['ucb'] - c['lcb']
+                if width > target_abs and (width / c['mean']) > target_rel:
+                    needs_iter.append(c)
+
+            # If no combos need iterations, exit inner loop
+            if not needs_iter:
+                break
+
+    return total_added, batches
+
 def print_progress(batch_num, all_combos, remaining_combos, target_abs, target_rel,
                    total_estimated_batches, start_time):
     """
@@ -768,6 +847,11 @@ def print_progress(batch_num, all_combos, remaining_combos, target_abs, target_r
     top_mean = top_combo['mean']
     top_precision_abs = (top_combo['ucb'] - top_combo['lcb'])  # = 2*(ucb-mean)
     top_precision_rel = top_precision_abs / top_mean if top_mean != 0 else float('inf')
+
+    # Highest UCB combo
+    highest_ucb_combo = max(remaining_combos, key=lambda c: c['ucb'])
+    highest_ucb = highest_ucb_combo['ucb']
+    highest_ucb_id = highest_ucb_combo['id']
 
     # Remaining count
     remaining_count = len(remaining_combos)
@@ -787,6 +871,7 @@ def print_progress(batch_num, all_combos, remaining_combos, target_abs, target_r
     print("\n" + "="*60)
     print(f"Batch {batch_num}")
     print(f"  Top mean DPS: {top_mean:.2f}")
+    print(f"  Highest UCB: {highest_ucb:.2f} (combo {highest_ucb_id})")
     print(f"  Remaining combos: {remaining_count}")
     print(f"  Top combo precision (abs): {top_precision_abs:.2f}, (rel): {top_precision_rel:.2%}")
     print(f"  Estimated remaining batches: {remaining_batches}")
@@ -834,15 +919,15 @@ if __name__ == "__main__":
 
     # ========== INITIAL BATCH IN CHUNKS ==========
     # Split combos into smaller groups to avoid SimC memory overload.
-    CHUNK_SIZE = 200   # adjust based on your available memory; 200 is safe for ~1‑2GB per run
+    CHUNK_SIZE = 200
     master_list = []
 
     for chunk_start in range(0, len(all_ids), CHUNK_SIZE):
         chunk_ids = all_ids[chunk_start:chunk_start + CHUNK_SIZE]
         print(f"\n--- Initial batch for chunk {chunk_start//CHUNK_SIZE + 1}: {len(chunk_ids)} combos ---")
 
-        # Build a batch file with 50 iterations per combo in this chunk
-        iter_dict = {cid: 50 for cid in chunk_ids}
+        # Build a batch file with 100 iterations per combo in this chunk
+        iter_dict = {cid: 100 for cid in chunk_ids}
         batch_file = create_batch_file(
             iter_dict, out_dir, profile_file, opts_file,
             f"batch_initial_chunk_{chunk_start//CHUNK_SIZE + 1}.simc"
@@ -858,7 +943,7 @@ if __name__ == "__main__":
                 r = result_map[name]
                 mean = r['mean']
                 mean_stddev = r['mean_stddev']
-                iterations = 50
+                iterations = 100
                 stddev = mean_stddev * math.sqrt(iterations)
                 ucb, lcb = compute_ucb_lcb(mean, mean_stddev, confidence)
                 master_list.append({
