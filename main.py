@@ -12,6 +12,8 @@ import re
 import time
 import shutil
 import glob
+import math
+import subprocess
 from collections import defaultdict
 
 # ---------- Constants ----------
@@ -27,21 +29,50 @@ SLOTS = [
 ]
 
 def get_item_id(item):
-    """Return the item ID from the fields, or None if absent."""
     return item.get("fields", {}).get("id") if item else None
+
+# ---------- Checkpoint Functions ----------
+CHECKPOINT_FILE = "checkpoint.json"
+
+def save_checkpoint(master_list, loop_count, descriptions):
+    data = {
+        "version": 1,
+        "master_list": master_list,
+        "loop_count": loop_count,
+        "descriptions": descriptions
+    }
+    with open(CHECKPOINT_FILE, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=2)
+    print(f"Checkpoint saved to {CHECKPOINT_FILE}")
+
+def load_checkpoint():
+    if not os.path.exists(CHECKPOINT_FILE):
+        return None
+    try:
+        with open(CHECKPOINT_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        if data.get("version") != 1:
+            print("Warning: checkpoint version mismatch, ignoring.")
+            return None
+        master_list = data["master_list"]
+        loop_count = data["loop_count"]
+        descriptions = data["descriptions"]
+        print(f"Loaded checkpoint: loop_count={loop_count}, combos={len(master_list)}")
+        return master_list, loop_count, descriptions
+    except Exception as e:
+        print(f"Failed to load checkpoint: {e}")
+        return None
+
+def delete_checkpoint():
+    if os.path.exists(CHECKPOINT_FILE):
+        os.remove(CHECKPOINT_FILE)
+        print(f"Checkpoint {CHECKPOINT_FILE} deleted.")
+
 # ---------- Cleanup Function ----------
 def cleanup_previous_runs(profile_dir="profiles"):
-    """
-    Remove all artifacts from previous runs:
-      - the entire profile directory (containing profile_*.simc files)
-      - any batch_*.simc and results_*.json files in the current directory
-    """
-    # Remove profile directory
     if os.path.exists(profile_dir):
         shutil.rmtree(profile_dir)
         print(f"Removed previous profile directory: {profile_dir}")
-
-    # Remove generated batch and result files
     patterns = ["batch_*.simc", "results_*.json"]
     for pat in patterns:
         for f in glob.glob(pat):
@@ -53,10 +84,6 @@ def is_single_word(s):
     return ' ' not in s and '\t' not in s
 
 def parse_profile(file_path):
-    """
-    Returns (result_dict, active_pairs, commented_pairs)
-    where active_pairs: key->value for all active key=value lines (except class? we keep class too)
-    """
     active_pairs = {}
     commented_pairs = {}
     with open(file_path, 'r', encoding='utf-8') as f:
@@ -269,21 +296,18 @@ def generate_gear_combinations(profile_data):
 def get_sockets(gear_combo, gems_settings):
     sockets = []
     for slot, item in gear_combo.items():
-        # Parse original gem IDs from the item's gem_id field
         gem_ids = item["fields"].get("gem_id", "")
         gem_list = gem_ids.split('/') if gem_ids else []
-        # For each socket index, determine if it originally contained a meta gem
         for idx in range(len(gem_list)):
             gid = gem_list[idx]
             is_meta = False
             if gid in gems_settings:
                 is_meta = gems_settings[gid].get("meta", False)
-            # If the socket is empty (no gem), we treat it as non-meta
             sockets.append((slot, idx, is_meta))
     return sockets
 
 def generate_gem_placements(gear_combo, gems_settings):
-    sockets = get_sockets(gear_combo, gems_settings)  # list of (slot, idx, is_meta)
+    sockets = get_sockets(gear_combo, gems_settings)
     if not sockets:
         yield {}
         return
@@ -298,11 +322,6 @@ def generate_gem_placements(gear_combo, gems_settings):
         yield {}
         return
 
-    # Separate meta and non‑meta gem IDs
-    meta_gem_ids = [gid for gid in gem_ids if gems_settings[gid].get("meta", False)]
-    non_meta_gem_ids = [gid for gid in gem_ids if not gems_settings[gid].get("meta", False)]
-
-    # Generate count vectors for all gems (unchanged DFS)
     vectors = []
     def dfs(gem_idx, remaining, counts, meta_used):
         if gem_idx == len(gem_ids):
@@ -328,24 +347,19 @@ def generate_gem_placements(gear_combo, gems_settings):
 
     dfs(0, len(sockets), {}, False)
 
-    # For each vector, try to place gems respecting socket types
     for vec in vectors:
-        # Check feasibility: total meta gems <= meta_sockets, total non‑meta <= non_meta_sockets
         total_meta = sum(cnt for gid, cnt in vec.items() if gems_settings[gid].get("meta", False))
         total_non_meta = sum(cnt for gid, cnt in vec.items() if not gems_settings[gid].get("meta", False))
         if total_meta > total_meta_sockets or total_non_meta > total_non_meta_sockets:
             continue
 
-        # Build list of (gid, count) sorted: meta gems first, then by slot preference length
         items = [(gid, cnt) for gid, cnt in vec.items() if cnt > 0]
         items.sort(key=lambda x: (
             - (1 if gems_settings[x[0]].get('meta', False) else 0),
             - len(gems_settings[x[0]].get('slots', []))
         ))
 
-        # We'll place meta gems only on meta sockets, non‑meta only on non‑meta
-        # Separate sockets accordingly
-        meta_socket_pool = meta_sockets[:]   # list of (slot, idx, True)
+        meta_socket_pool = meta_sockets[:]
         non_meta_socket_pool = non_meta_sockets[:]
 
         placement = {}
@@ -354,13 +368,12 @@ def generate_gem_placements(gear_combo, gems_settings):
             is_meta = spec.get('meta', False)
             pref_slots = spec.get('slots', [])
             if is_meta:
-                pref_slots = ['head']  # meta gems only on head, but we rely on socket type
+                pref_slots = ['head']
                 pool = meta_socket_pool
             else:
                 pool = non_meta_socket_pool
 
             placed = 0
-            # Try preferred slots first
             for slot, idx, _ in pool[:]:
                 if placed >= count:
                     break
@@ -368,7 +381,6 @@ def generate_gem_placements(gear_combo, gems_settings):
                     placement[(slot, idx)] = gid
                     pool.remove((slot, idx, True if is_meta else False))
                     placed += 1
-            # If still need to place, use any remaining socket in the correct pool
             if placed < count:
                 for slot, idx, _ in pool[:]:
                     if placed >= count:
@@ -377,10 +389,8 @@ def generate_gem_placements(gear_combo, gems_settings):
                     pool.remove((slot, idx, True if is_meta else False))
                     placed += 1
             if placed < count:
-                # Not enough sockets of the correct type – skip this vector
                 break
         else:
-            # All gems placed successfully
             yield placement
 
 # ---------- Enchant Combinations ----------
@@ -397,7 +407,6 @@ def generate_enchant_combinations(gear_combo, enchants_settings):
 
 # ---------- Main Generator (minimal profileset files) ----------
 def generate_profiles(profile_file, settings_file, output_dir):
-    # Ensure output directory exists
     os.makedirs(output_dir, exist_ok=True)
 
     profile_data, active_pairs_orig, _ = parse_profile(profile_file)
@@ -405,22 +414,20 @@ def generate_profiles(profile_file, settings_file, output_dir):
     gems_settings = settings_data.get('gems', {})
     enchants_settings = settings_data.get('enchants', {})
 
-    # ----- Write the base (no‑change) profile as profile_0.simc -----
     base_path = os.path.join(output_dir, "profile_0.simc")
     with open(base_path, 'w', encoding='utf-8') as f:
-        f.write("")   # empty file – no overrides
+        f.write("")
     descriptions = {0: "base gear (no changes)"}
 
     gear_combos = list(generate_gear_combinations(profile_data))
-    combo_counter = 1          # start numbering changed combos from 1
-    seen = set()               # stores final gear strings for deduplication
+    combo_counter = 1
+    seen = set()
 
     for gear_combo in gear_combos:
         gem_placements = list(generate_gem_placements(gear_combo, gems_settings))
         for gem_placement in gem_placements:
             enchant_combos = list(generate_enchant_combinations(gear_combo, enchants_settings))
             for enchant_assignment in enchant_combos:
-                # Build the final gear strings for each slot
                 final_gear = []
                 slot_items = {}
 
@@ -430,7 +437,6 @@ def generate_profiles(profile_file, settings_file, output_dir):
                         "fields": item["fields"].copy()
                     }
 
-                    # Apply gems
                     num_sockets = get_socket_count(item)
                     slot_gems = []
                     for idx in range(num_sockets):
@@ -439,7 +445,6 @@ def generate_profiles(profile_file, settings_file, output_dir):
                     if any(g is not None for g in slot_gems):
                         set_gems(new_item, slot_gems)
 
-                    # Apply enchant
                     enchant = enchant_assignment.get(slot)
                     if enchant is not None:
                         set_enchant(new_item, enchant)
@@ -448,13 +453,11 @@ def generate_profiles(profile_file, settings_file, output_dir):
                     slot_items[slot] = formatted
                     final_gear.append((slot, formatted))
 
-                # Deduplicate
                 key = tuple(sorted(final_gear))
                 if key in seen:
                     continue
                 seen.add(key)
 
-                # Build change set (only lines that differ from original)
                 new_pairs = {}
                 for slot, formatted in slot_items.items():
                     if slot in active_pairs_orig and formatted != active_pairs_orig[slot]:
@@ -462,7 +465,6 @@ def generate_profiles(profile_file, settings_file, output_dir):
                     elif slot not in active_pairs_orig:
                         new_pairs[slot] = formatted
 
-                # Write profile file only if there are changes
                 if new_pairs:
                     prefix = f'profileset."Combo {combo_counter}"+='
                     lines = [f"{prefix}{k}={v}" for k, v in sorted(new_pairs.items())]
@@ -508,15 +510,8 @@ def build_batch_simc(iterations_dict, folder_name, output_file='batch.simc',
 
 def create_batch_with_deterministic(profile_file, settings_file, output_dir='profiles',
                                     options_file='options.simc', batch_file='batch.simc'):
-    """
-    Generate all profile variants and create a combined .simc file with iterations=-4
-    for every combo (deterministic mode).
-    Returns the path to the generated batch file.
-    """
-    # 1. Generate the profileset files (minimal overrides)
     generate_profiles(profile_file, settings_file, output_dir)
 
-    # 2. Find all profile_<id>.simc files that were created
     import re, os
     max_id = -1
     for fname in os.listdir(output_dir):
@@ -527,22 +522,11 @@ def create_batch_with_deterministic(profile_file, settings_file, output_dir='pro
         print("No profiles were generated.")
         return None
 
-    # 3. Build iteration dict: every combo gets -4 (deterministic)
     iterations_dict = {i: -4 for i in range(max_id + 1)}
-
-    # 4. Create the batch file
     build_batch_simc(iterations_dict, output_dir, batch_file, profile_file, options_file)
     return batch_file
 
-import subprocess
-import json
-
 def create_batch_file(iterations_dict, folder_name, profile_file, options_file, output_file):
-    """
-    Create a batch .simc file with given iterations per combo.
-    iterations_dict: {combo_id: iterations} (negative -> deterministic)
-    """
-    # Get player name
     profile_data, _, _ = parse_profile(profile_file)
     player_name = profile_data.get('player_name')
     if not player_name:
@@ -557,7 +541,6 @@ def create_batch_file(iterations_dict, folder_name, profile_file, options_file, 
     lines.append(f"input={profile_file}")
     lines.append(f"input={options_file}")
     lines.append(f"active={player_name}")
-    #lines.append(f'path=".\\{folder_name}"')
 
     for combo_id in sorted(iterations_dict.keys()):
         iters = abs(iterations_dict[combo_id])
@@ -569,12 +552,7 @@ def create_batch_file(iterations_dict, folder_name, profile_file, options_file, 
     print(f"Batch file written to {output_file}")
     return output_file
 
-
 def run_simc_and_parse_results(batch_file, simc_path, json_output_file="results.json"):
-    """
-    Execute simc with the given batch file and JSON output.
-    Returns a list of dicts: [{'name': profileset_name, 'mean': dps, 'mean_stddev': std}, ...]
-    """
     cmd = [simc_path, batch_file, f"json={json_output_file}"]
     print(f"Running: {' '.join(cmd)}")
     try:
@@ -596,62 +574,13 @@ def run_simc_and_parse_results(batch_file, simc_path, json_output_file="results.
         })
     return extracted
 
-
-def process_results(results):
-    """
-    Accepts results list from simc; returns unique list and duplicate list.
-    """
-    seen_means = {}
-    unique_list = []
-    duplicate_list = []
-
-    for entry in results:
-        name = entry.get('name', '')
-        try:
-            combo_id = int(name.split()[1])
-        except (IndexError, ValueError):
-            print(f"Warning: unexpected profileset name format: {name}")
-            continue
-
-        mean = entry.get('mean')
-        if mean is None:
-            print(f"Warning: no mean for {name}")
-            continue
-
-        if mean in seen_means:
-            duplicate_list.append({'id': combo_id, 'same_as': seen_means[mean]})
-        else:
-            seen_means[mean] = combo_id
-            unique_list.append({
-                'id': combo_id,
-                'mean': 0.0,
-                'mean_stddev': 0.0,
-                'iterations': 0,
-                'ucb': float('inf'),
-                'lcb': 0.0
-            })
-    return unique_list, duplicate_list
-
-
 def compute_ucb_lcb(mean, stddev, confidence):
-    """
-    Compute UCB and LCB using the formula:
-    mean ± mean_stddev * (1/(16*(1-confidence) - 0.5) + 1.1)
-    """
     factor = 1.0 / (16.0 * (1-confidence) - 0.5) + 1.1
     ucb = mean + stddev * factor
     lcb = mean - stddev * factor
     return ucb, lcb
 
-import math
-
 def allocate_iterations(combos, batch_size, target_abs, target_rel):
-    """
-    Given a list of combo dicts (each with 'id', 'mean', 'ucb', 'iterations'),
-    allocate up to batch_size*1000 iterations among combos that are not precise.
-    Returns a list of (combo_id, iterations_to_run).
-    """
-    # Work on a copy so we don't modify the original
     alloc_list = [
         {
             'id': c['id'],
@@ -664,20 +593,18 @@ def allocate_iterations(combos, batch_size, target_abs, target_rel):
 
     total_iters = batch_size * 1000
     allocated = 0
-    allocations = []  # list of (id, additional_iterations)
+    allocations = []
 
     while allocated < total_iters:
-        # Check if all remaining combos are already precise
         all_precise = True
         for a in alloc_list:
-            interval_width = (a['ucb'] - a['mean']) * 2   # ucb - lcb
+            interval_width = (a['ucb'] - a['mean']) * 2
             if interval_width > target_abs and (interval_width / a['mean']) > target_rel:
                 all_precise = False
                 break
         if all_precise:
             break
 
-        # Pick the combo with highest UCB that is not precise
         best = None
         best_ucb = -float('inf')
         for a in alloc_list:
@@ -687,9 +614,8 @@ def allocate_iterations(combos, batch_size, target_abs, target_rel):
                     best_ucb = a['ucb']
                     best = a
         if best is None:
-            break   # no combo needs more iterations
+            break
 
-        # Give it 100 iterations
         old_iter = best['iterations']
         new_iter = old_iter + 1000
         old_ucb = best['ucb']
@@ -698,10 +624,8 @@ def allocate_iterations(combos, batch_size, target_abs, target_rel):
         best['ucb'] = new_ucb
         best['iterations'] = new_iter
         allocated += 1000
-        # Record that we allocated 1000 iterations to this combo
         allocations.append((best['id'], 1000))
 
-    # Combine allocations for the same combo
     combined = {}
     for cid, add_iters in allocations:
         combined[cid] = combined.get(cid, 0) + add_iters
@@ -709,16 +633,11 @@ def allocate_iterations(combos, batch_size, target_abs, target_rel):
     return [(cid, iters) for cid, iters in combined.items() if iters > 0]
 
 def merge_stats(old_mean, old_stddev, old_iter, new_mean, new_stddev, new_iter):
-    """
-    Merge old and new simulation statistics.
-    Returns (total_mean, total_stddev, total_mean_stddev, total_iter)
-    """
     total_iter = old_iter + new_iter
     total_mean = (old_mean * old_iter + new_mean * new_iter) / total_iter
 
     var1 = old_stddev ** 2
     var2 = new_stddev ** 2
-    # Combined variance formula
     total_var = ((old_iter - 1) * var1 + (new_iter - 1) * var2 +
                  old_iter * new_iter * (old_mean - new_mean) ** 2 / total_iter) / (total_iter - 1)
     total_stddev = math.sqrt(total_var)
@@ -726,42 +645,21 @@ def merge_stats(old_mean, old_stddev, old_iter, new_mean, new_stddev, new_iter):
     return total_mean, total_stddev, total_mean_stddev, total_iter
 
 def estimate_remaining_batches(combos, batch_size, target_abs, target_rel):
-    """
-    Estimate total additional iterations and number of full batches required,
-    simulating both precision improvement and elimination of dominated combos.
-
-    Parameters:
-        combos : list of dicts
-            Each dict must contain: 'id', 'mean', 'mean_stddev', 'iterations',
-            'ucb', 'lcb'. These are the *current remaining* combos (not dominated).
-        batch_size : int
-            Number of thousand iterations per batch.
-        target_abs : float
-            Absolute precision target (maximum interval width).
-        target_rel : float
-            Relative precision target (maximum interval width / mean).
-
-    Returns:
-        (total_iterations_needed, estimated_batches)
-    """
     if not combos:
         return 0, 0
 
-    # Maximum mean among all combos (constant throughout simulation)
     max_mean = max(c['mean'] for c in combos)
 
-    # Determine the confidence factor from the first combo that has mean_stddev
     factor = None
     for c in combos:
         if c.get('mean_stddev', 0) > 0:
             factor = (c['ucb'] - c['mean']) / c['mean_stddev']
             break
     if factor is None:
-        factor = 1.96   # fallback (typical for 95% confidence)
+        factor = 1.96
 
     max_batch_iters = batch_size * 1000
 
-    # Copy combos for simulation (mutate only these)
     sim = []
     for c in combos:
         sim.append({
@@ -777,12 +675,10 @@ def estimate_remaining_batches(combos, batch_size, target_abs, target_rel):
     batches = 0
 
     while True:
-        # 1. Active combos: those still not dominated (UCB >= max_mean)
         active = [c for c in sim if c['ucb'] >= max_mean]
         if not active:
             break
 
-        # 2. Among active, which ones need more iterations? (not precise)
         needs_iter = []
         for c in active:
             width = c['ucb'] - c['lcb']
@@ -790,23 +686,18 @@ def estimate_remaining_batches(combos, batch_size, target_abs, target_rel):
                 needs_iter.append(c)
 
         if not needs_iter:
-            # All active combos are precise – done
             break
 
-        # 3. Start a new batch
         budget = max_batch_iters
         batches += 1
 
-        # Allocate within this batch
         while budget > 0 and needs_iter:
-            # Pick the combo with highest UCB among those needing iterations
             best = max(needs_iter, key=lambda c: c['ucb'])
 
             add = 1000
             if add > budget:
-                add = budget   # only for completeness (real code always adds 1000)
+                add = budget
 
-            # Update statistics for the chosen combo
             old_n = best['iterations']
             new_n = old_n + add
             old_se = best['mean_stddev']
@@ -819,7 +710,6 @@ def estimate_remaining_batches(combos, batch_size, target_abs, target_rel):
             total_added += add
             budget -= add
 
-            # Re‑evaluate active set: some combos may now be dominated (UCB < max_mean)
             active = [c for c in sim if c['ucb'] >= max_mean]
             needs_iter = []
             for c in active:
@@ -827,46 +717,46 @@ def estimate_remaining_batches(combos, batch_size, target_abs, target_rel):
                 if width > target_abs and (width / c['mean']) > target_rel:
                     needs_iter.append(c)
 
-            # If no combos need iterations, exit inner loop
             if not needs_iter:
                 break
 
     return total_added, batches
 
 def print_progress(batch_num, all_combos, remaining_combos, target_abs, target_rel,
-                   total_estimated_batches, start_time):
+                   session_start_time, session_batch_count):
     """
-    Print a progress summary.
+    Print progress summary.
+    Uses session_start_time and session_batch_count to compute average time per batch
+    only from batches run in this session (so that resuming doesn't skew the estimate).
     """
     if not remaining_combos:
         print("No remaining combos.")
         return
 
-    # Top mean and top combo
     top_combo = max(remaining_combos, key=lambda c: c['mean'])
     top_mean = top_combo['mean']
-    top_precision_abs = (top_combo['ucb'] - top_combo['lcb'])  # = 2*(ucb-mean)
+    top_precision_abs = (top_combo['ucb'] - top_combo['lcb'])
     top_precision_rel = top_precision_abs / top_mean if top_mean != 0 else float('inf')
 
-    # Highest UCB combo
     highest_ucb_combo = max(remaining_combos, key=lambda c: c['ucb'])
     highest_ucb = highest_ucb_combo['ucb']
     highest_ucb_id = highest_ucb_combo['id']
 
-    # Remaining count
     remaining_count = len(remaining_combos)
 
-    # Estimate remaining batches (if not already computed)
     _, remaining_batches = estimate_remaining_batches(remaining_combos, batch_size, target_abs, target_rel)
 
-    # Progress: done batches = batch_num, total = done + remaining_batches
     total_est = batch_num + remaining_batches
     progress_pct = (batch_num / total_est) * 100 if total_est > 0 else 0
 
-    # Time estimation
-    elapsed = time.time() - start_time
-    avg_time_per_batch = elapsed / batch_num if batch_num > 0 else 0
-    est_time_remaining = avg_time_per_batch * remaining_batches
+    # Compute average time per batch only from this session's batches
+    if session_batch_count > 0:
+        elapsed = time.time() - session_start_time
+        avg_time_per_batch = elapsed / session_batch_count
+        est_time_remaining = avg_time_per_batch * remaining_batches
+        time_str = f"{est_time_remaining/60:.1f} min"
+    else:
+        time_str = "unknown"
 
     print("\n" + "="*60)
     print(f"Batch {batch_num}")
@@ -876,10 +766,7 @@ def print_progress(batch_num, all_combos, remaining_combos, target_abs, target_r
     print(f"  Top combo precision (abs): {top_precision_abs:.2f}, (rel): {top_precision_rel:.2%}")
     print(f"  Estimated remaining batches: {remaining_batches}")
     print(f"  Progress: {progress_pct:.1f}%")
-    if avg_time_per_batch > 0:
-        print(f"  Est. time remaining: {est_time_remaining/60:.1f} min")
-    else:
-        print("  Est. time remaining: unknown")
+    print(f"  Est. time remaining: {time_str}")
     print("="*60)
 
 if __name__ == "__main__":
@@ -890,86 +777,90 @@ if __name__ == "__main__":
     out_dir = "profiles"
     opts_file = "options.simc"
 
-    # Clean up previous runs first
-    cleanup_previous_runs(out_dir)
+    # Session timing: start now, and count batches run in this session
+    session_start_time = time.time()
+    session_batch_count = 0
 
-    # Load settings
-    settings = parse_settings(settings_file)
-    simc_path = settings.get('simc_path')
-    confidence = settings.get('confidence')
-    batch_size = settings.get('batch_size')
-    target_abs = settings.get('target_absolute_error')
-    target_rel = settings.get('target_relative_error')
+    checkpoint_data = load_checkpoint()
+    if checkpoint_data is not None:
+        master_list, loop_count, descriptions = checkpoint_data
+        print("Resuming from checkpoint. Skipping cleanup, profile generation, and initial chunks.")
+        settings = parse_settings(settings_file)
+        simc_path = settings.get('simc_path')
+        confidence = settings.get('confidence')
+        batch_size = settings.get('batch_size')
+        target_abs = settings.get('target_absolute_error')
+        target_rel = settings.get('target_relative_error')
+        # session_batch_count remains 0 – we haven't run any batches in this session yet
+    else:
+        cleanup_previous_runs(out_dir)
 
-    # Step 1: Generate minimal profiles and get descriptions
-    descriptions = generate_profiles(profile_file, settings_file, out_dir)
+        settings = parse_settings(settings_file)
+        simc_path = settings.get('simc_path')
+        confidence = settings.get('confidence')
+        batch_size = settings.get('batch_size')
+        target_abs = settings.get('target_absolute_error')
+        target_rel = settings.get('target_relative_error')
 
-    # Step 2: Find all generated profile IDs
-    max_id = -1
-    for fname in os.listdir(out_dir):
-        m = re.match(r'profile_(\d+)\.simc', fname)
-        if m:
-            max_id = max(max_id, int(m.group(1)))
-    if max_id < 0:
-        print("No profiles generated.")
-        sys.exit(1)
+        descriptions = generate_profiles(profile_file, settings_file, out_dir)
 
-    all_ids = list(range(max_id + 1))
-    print(f"Total combos: {len(all_ids)} (including base profile 0)")
+        max_id = -1
+        for fname in os.listdir(out_dir):
+            m = re.match(r'profile_(\d+)\.simc', fname)
+            if m:
+                max_id = max(max_id, int(m.group(1)))
+        if max_id < 0:
+            print("No profiles generated.")
+            sys.exit(1)
 
-    # ========== INITIAL BATCH IN CHUNKS ==========
-    # Split combos into smaller groups to avoid SimC memory overload.
-    CHUNK_SIZE = 200
-    master_list = []
+        all_ids = list(range(max_id + 1))
+        print(f"Total combos: {len(all_ids)} (including base profile 0)")
 
-    for chunk_start in range(0, len(all_ids), CHUNK_SIZE):
-        chunk_ids = all_ids[chunk_start:chunk_start + CHUNK_SIZE]
-        print(f"\n--- Initial batch for chunk {chunk_start//CHUNK_SIZE + 1}: {len(chunk_ids)} combos ---")
+        # Initial batches in chunks
+        CHUNK_SIZE = 200
+        master_list = []
 
-        # Build a batch file with 100 iterations per combo in this chunk
-        iter_dict = {cid: 100 for cid in chunk_ids}
-        batch_file = create_batch_file(
-            iter_dict, out_dir, profile_file, opts_file,
-            f"batch_initial_chunk_{chunk_start//CHUNK_SIZE + 1}.simc"
-        )
-        json_file = f"results_initial_chunk_{chunk_start//CHUNK_SIZE + 1}.json"
-        raw_results = run_simc_and_parse_results(batch_file, simc_path, json_file)
+        for chunk_start in range(0, len(all_ids), CHUNK_SIZE):
+            chunk_ids = all_ids[chunk_start:chunk_start + CHUNK_SIZE]
+            print(f"\n--- Initial batch for chunk {chunk_start//CHUNK_SIZE + 1}: {len(chunk_ids)} combos ---")
 
-        # Store results for each combo in the chunk
-        result_map = {r['name']: r for r in raw_results}
-        for cid in chunk_ids:
-            name = f"Combo {cid}"
-            if name in result_map:
-                r = result_map[name]
-                mean = r['mean']
-                mean_stddev = r['mean_stddev']
-                iterations = 100
-                stddev = mean_stddev * math.sqrt(iterations)
-                ucb, lcb = compute_ucb_lcb(mean, mean_stddev, confidence)
-                master_list.append({
-                    'id': cid,
-                    'mean': mean,
-                    'stddev': stddev,
-                    'mean_stddev': mean_stddev,
-                    'iterations': iterations,
-                    'ucb': ucb,
-                    'lcb': lcb
-                })
-            else:
-                print(f"Warning: no result for {name}")
+            iter_dict = {cid: 100 for cid in chunk_ids}
+            batch_file = create_batch_file(
+                iter_dict, out_dir, profile_file, opts_file,
+                f"batch_initial_chunk_{chunk_start//CHUNK_SIZE + 1}.simc"
+            )
+            json_file = f"results_initial_chunk_{chunk_start//CHUNK_SIZE + 1}.json"
+            raw_results = run_simc_and_parse_results(batch_file, simc_path, json_file)
 
-    # Now master_list contains all combos with initial stats.
-    # ========================================================
+            result_map = {r['name']: r for r in raw_results}
+            for cid in chunk_ids:
+                name = f"Combo {cid}"
+                if name in result_map:
+                    r = result_map[name]
+                    mean = r['mean']
+                    mean_stddev = r['mean_stddev']
+                    iterations = 100
+                    stddev = mean_stddev * math.sqrt(iterations)
+                    ucb, lcb = compute_ucb_lcb(mean, mean_stddev, confidence)
+                    master_list.append({
+                        'id': cid,
+                        'mean': mean,
+                        'stddev': stddev,
+                        'mean_stddev': mean_stddev,
+                        'iterations': iterations,
+                        'ucb': ucb,
+                        'lcb': lcb
+                    })
+                else:
+                    print(f"Warning: no result for {name}")
 
-    survivor_ids = set()
-    start_time = time.time()
-    loop_count = 0
+        loop_count = 0
+        # Save checkpoint after initial chunks
+        save_checkpoint(master_list, loop_count, descriptions)
 
+    # ========== MAIN LOOP ==========
     while True:
-        # 1. Find highest mean
         max_mean = max(u['mean'] for u in master_list)
-
-        # 2. Filter out dominated (UCB < max_mean)
         remaining = [u for u in master_list if u['ucb'] >= max_mean]
         survivor_ids = {u['id'] for u in remaining}
 
@@ -977,25 +868,21 @@ if __name__ == "__main__":
             print("All combos dominated. Stopping.")
             break
 
-        # 3. Allocate iterations
         allocations = allocate_iterations(remaining, batch_size, target_abs, target_rel)
 
         if not allocations:
             print("No additional iterations allocated (all remaining combos precise).")
             break
 
-        # --- Progress report before running this batch ---
         print_progress(loop_count, master_list, remaining, target_abs, target_rel,
-                       None, start_time)
+                       session_start_time, session_batch_count)
 
-        # 4. Run batch
         iter_dict = {cid: iters for cid, iters in allocations}
         batch_file = create_batch_file(iter_dict, out_dir, profile_file, opts_file,
                                        f"batch_alloc_{loop_count}.simc")
         raw_results = run_simc_and_parse_results(batch_file, simc_path, f"results_alloc_{loop_count}.json")
         result_map = {r['name']: r for r in raw_results}
 
-        # 5. Merge results
         for u in master_list:
             name = f"Combo {u['id']}"
             if name in result_map:
@@ -1017,8 +904,11 @@ if __name__ == "__main__":
                 u['ucb'], u['lcb'] = compute_ucb_lcb(merged_mean, merged_mean_stddev, confidence)
 
         loop_count += 1
+        session_batch_count += 1   # count this batch in the current session
 
-    # Build final results for survivors
+        save_checkpoint(master_list, loop_count, descriptions)
+
+    # ========== FINAL RESULTS ==========
     final_results = []
     for u in master_list:
         if u['id'] in survivor_ids:
@@ -1033,10 +923,11 @@ if __name__ == "__main__":
                 'changes': descriptions.get(u['id'], 'unknown')
             })
 
-    # Output final survivors
     print("\n=== Final Survivors ===")
     final_results.sort(key=lambda x: x['id'])
     for r in final_results:
         print(f"Combo {r['id']}: mean={r['mean']:.2f}, std={r['stddev']:.2f}, "
               f"iter={r['iterations']}, UCB={r['ucb']:.2f}, LCB={r['lcb']:.2f}")
         print(f"  Changes: {r['changes']}\n")
+
+    delete_checkpoint()
