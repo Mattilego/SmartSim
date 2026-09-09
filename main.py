@@ -72,12 +72,10 @@ def delete_checkpoint():
 def cleanup_previous_runs(profile_dir="profiles"):
     if os.path.exists(profile_dir):
         shutil.rmtree(profile_dir)
-        print(f"Removed previous profile directory: {profile_dir}")
     patterns = ["batch_*.simc", "results_*.json"]
     for pat in patterns:
         for f in glob.glob(pat):
             os.remove(f)
-            print(f"Removed {f}")
 
 # ---------- Parsing Functions ----------
 def is_single_word(s):
@@ -923,11 +921,48 @@ if __name__ == "__main__":
                 'changes': descriptions.get(u['id'], 'unknown')
             })
 
-    print("\n=== Final Survivors ===")
+    print("\n=== Final best profiles ===")
     final_results.sort(key=lambda x: x['id'])
     for r in final_results:
         print(f"Combo {r['id']}: mean={r['mean']:.2f}, std={r['stddev']:.2f}, "
               f"iter={r['iterations']}, UCB={r['ucb']:.2f}, LCB={r['lcb']:.2f}")
         print(f"  Changes: {r['changes']}\n")
 
+        # ---- Save best profiles (full base + changes) ----
+    best_dir = "best_profiles"
+    if os.path.exists(best_dir):
+        shutil.rmtree(best_dir)
+        print(f"Removed previous best profiles directory: {best_dir}")
+    os.makedirs(best_dir, exist_ok=True)
+
+    # Read the base profile once
+    with open(profile_file, 'r', encoding='utf-8') as f:
+        base_content = f.read()
+
+    for r in final_results:
+        src = os.path.join(out_dir, f"profile_{r['id']}.simc")
+        if os.path.exists(src):
+            dst = os.path.join(best_dir, f"profile_{r['id']}.simc")
+            # Read the changed lines (they may have the prefix)
+            with open(src, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+            prefix = f'profileset."Combo {r["id"]}"+='
+            changed_lines = []
+            for line in lines:
+                if line.startswith(prefix):
+                    changed_lines.append(line[len(prefix):])
+                else:
+                    # In case there are lines without prefix (shouldn't happen)
+                    changed_lines.append(line)
+            # Write the base content, then the changed gear lines
+            with open(dst, 'w', encoding='utf-8') as f:
+                f.write(base_content)
+                # Ensure there's a newline between base and changes
+                if base_content and not base_content.endswith('\n'):
+                    f.write('\n')
+                f.writelines(changed_lines)
+            print(f"Saved profile {r['id']} to {dst}")
+
+    # Clean up original profiles, batch files, and checkpoint
     delete_checkpoint()
+    cleanup_previous_runs(out_dir)

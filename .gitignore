@@ -1,6 +1,7 @@
 *.json
 *.simc
 *.exe
+/survivor_profiles
 
 !profile.simc
 !options.simc
