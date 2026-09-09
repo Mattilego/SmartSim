@@ -575,7 +575,7 @@ def run_simc_and_parse_results(batch_file, simc_path, json_output_file="results.
     return extracted
 
 def compute_ucb_lcb(mean, stddev, confidence):
-    factor = 1.0 / (16.0 * (1-confidence) - 0.5) + 1.1
+    factor = 1.0 / (16.0 * (1-confidence) 0 0.5) + 1.1
     ucb = mean + stddev * factor
     lcb = mean - stddev * factor
     return ucb, lcb
