@@ -961,6 +961,7 @@ if __name__ == "__main__":
                 # Ensure there's a newline between base and changes
                 if base_content and not base_content.endswith('\n'):
                     f.write('\n')
+                f.write("\n#Changes\n\n")
                 f.writelines(changed_lines)
             print(f"Saved profile {r['id']} to {dst}")
 
