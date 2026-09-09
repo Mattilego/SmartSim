@@ -811,14 +811,15 @@ if __name__ == "__main__":
         print(f"Total combos: {len(all_ids)} (including base profile 0)")
 
         # Initial batches in chunks
-        CHUNK_SIZE = 200
+        CHUNK_SIZE = 100
+        CHUNK_ITERATIONS = 50
         master_list = []
 
         for chunk_start in range(0, len(all_ids), CHUNK_SIZE):
             chunk_ids = all_ids[chunk_start:chunk_start + CHUNK_SIZE]
             print(f"\n--- Initial batch for chunk {chunk_start//CHUNK_SIZE + 1}: {len(chunk_ids)} combos ---")
 
-            iter_dict = {cid: 100 for cid in chunk_ids}
+            iter_dict = {cid: CHUNK_ITERATIONS for cid in chunk_ids}
             batch_file = create_batch_file(
                 iter_dict, out_dir, profile_file, opts_file,
                 f"batch_initial_chunk_{chunk_start//CHUNK_SIZE + 1}.simc"
@@ -833,7 +834,7 @@ if __name__ == "__main__":
                     r = result_map[name]
                     mean = r['mean']
                     mean_stddev = r['mean_stddev']
-                    iterations = 100
+                    iterations = CHUNK_ITERATIONS
                     stddev = mean_stddev * math.sqrt(iterations)
                     ucb, lcb = compute_ucb_lcb(mean, mean_stddev, confidence)
                     master_list.append({
