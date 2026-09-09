@@ -777,10 +777,6 @@ if __name__ == "__main__":
     out_dir = "profiles"
     opts_file = "options.simc"
 
-    # Session timing: start now, and count batches run in this session
-    session_start_time = time.time()
-    session_batch_count = 0
-
     checkpoint_data = load_checkpoint()
     if checkpoint_data is not None:
         master_list, loop_count, descriptions = checkpoint_data
@@ -858,6 +854,10 @@ if __name__ == "__main__":
         # Save checkpoint after initial chunks
         save_checkpoint(master_list, loop_count, descriptions)
 
+
+    # Session timing: start now, and count batches run in this session
+    session_start_time = time.time()
+    session_batch_count = 0
     # ========== MAIN LOOP ==========
     while True:
         max_mean = max(u['mean'] for u in master_list)
