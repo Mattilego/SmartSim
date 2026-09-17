@@ -47,13 +47,14 @@ EXCLUDED_STATS = {
 
 from collections import Counter, defaultdict  # add Counter to imports
 
+@lru_cache(maxsize=None)
 def _split_gems(item_str):
-    """Yield gem ids from an item string without building a list per call."""
     for part in item_str.split(','):
         if part.startswith('gem_id='):
-            return part[7:].split('/')
+            return tuple(part[7:].split('/'))   # tuple, not list
     return ()
 
+@lru_cache(maxsize=None)
 def _get_enchant_id(item_str):
     """Return the enchant id (as a string) from an item string, or None."""
     for part in item_str.split(','):
@@ -344,6 +345,7 @@ def _parse_weapon_from_html(html_path):
 
     return float(m.group(1)), float(m.group(2)), float(m.group(3))
 
+@lru_cache(maxsize=None)
 def normalize_item_string(item_str):
     """
     Remove gem_id and enchant_id fields from an item string.
@@ -1481,6 +1483,10 @@ def print_progress(batch_num, all_combos, remaining_combos, target_abs, target_r
     print(f"  Progress: {progress_pct:.1f}%")
     print(f"  Est. time remaining: {time_str}")
     print("="*60)
+
+#import cProfile, pstats
+#cProfile.run("generate_profiles('profile.simc','settings.json','profiles')", "gen.prof")
+#pstats.Stats("gen.prof").sort_stats("cumulative").print_stats(30)
 
 if __name__ == "__main__":
     import sys, subprocess, json, os, re, math

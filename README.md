@@ -37,6 +37,7 @@ Duplicate identical loadouts are dropped. Combo `0` is always the unchanged base
   "target_absolute_error": 1,
   "target_relative_error": 0.00000005,
   "confidence": 0.95,
+  "filter_dominated_combinations": true,
   "gems": {
     "32196": {},
     "213488": { "max": 1, "slots": ["neck", "wrist"] },
@@ -49,11 +50,15 @@ Duplicate identical loadouts are dropped. Combo `0` is always the unchanged base
 - **`batch_size`**: how many combos get extra iterations in each allocation pass (each grant is 1000 iterations).
 - **`target_absolute_error` / `target_relative_error`**: a combo is “precise enough” when the width of the confidence interva is either < target_absolute_error or < taret_relative_error * the mean
 - **`confidence`**: used for upper/lower confidence bounds (UCB/LCB).
+- **`filer_dominated_cominations`**: Adds a filter step removing all combinations with the same or strictly worse stats with no different effects
 - **`gems`**: keys are gem IDs. Optional fields:
   - `min` / `max`: how many copies may be used (`max: -1` means fill remaining sockets)
   - `slots`: preferred slots
   - `meta`: meta gems only go in sockets that already had a meta gem on the item
-- **`enchants`**: map of slot name → list of `enchant_id` integers. Each listed enchant is tried in addition to leaving the item’s existing enchant.
+  - `effect_identifier`: string for any effect the gem has beyond stats, used for filtering
+- **`enchants`**: object with enchant info
+  - `id`: enchant id, can be found on wowhead in the effect of the spell for applying it
+  - `effect_identifier`: string for any effect the gem has beyond stats, used for filtering
 
 Gems are placed only in sockets that already exist on the item (`gem_id` in the profile).
 
@@ -65,8 +70,6 @@ From the project directory:
 python main.py
 ```
 
-Each run deletes previous `profiles/`, `batch_*.simc`, and `results_*.json` files first.
-
 What happens:
 
 1. Generate one `.simc` profileset file per unique combo under `profiles/`.
@@ -76,6 +79,8 @@ What happens:
 5. Repeat until nothing extra is allocated, or every remaining combo is precise.
 
 Progress prints after each allocation batch (top mean, highest UCB, remaining count, estimated time). At the end it prints **Final Survivors**: mean, std, iterations, UCB/LCB, and a description of what changed vs the base profile.
+
+A checkpoint file is created after each batch, if present on startup it resumes with it instead of restarting
 
 ## License
 

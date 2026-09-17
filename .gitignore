@@ -1,6 +1,7 @@
 *.json
 *.simc
 *.exe
+*test*
 /best_profiles
 /profiles
 !profile.simc
