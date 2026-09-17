@@ -1,19 +1,23 @@
 {
     "simc_path": "simc.exe",
-    "batch_size": 200,
-    "target_absolute_error": 2,
+    "batch_size": 20,
+    "target_absolute_error": 1,
     "target_relative_error": 0.00000005,
-    "confidence": 0.90,
+    "filter_dominated_combinations": true,
+    "confidence": 0.99,
     "gems": {
         "32196": {},
-        "213488": {"max": 1, "slots": ["neck", "wrist"]},
-        "213485": {"max": 1, "slots": ["neck", "wrist"]},
-        "213470": {"max": 1, "slots": ["neck", "wrist"]},
-        "213476": {"max": 1, "slots": ["neck", "wrist"]},
-        "35760": {"max": 4},
-        "32225": {"max": 0},
-        "68780": {"min":1, "max": 1, "meta": true, "slots": ["head"]},
-        "213743": {"min":1, "max": 1, "slots": ["head"]}
+        "213488": {"max": 1, "slots": ["neck", "wrist"], "effect_identifier": "tww_haste"},
+        "213485": {"max": 1, "slots": ["neck", "wrist"], "effect_identifier": "tww_haste"},
+        "213470": {"max": 1, "slots": ["neck", "wrist"], "effect_identifier": "tww_vers"},
+        "213476": {"max": 1, "slots": ["neck", "wrist"], "effect_identifier": "tww_vers"},
+        "35760": {"max": -1},
+        "32225": {"max": -1},
+        "68780": {"min": 1, "max": 1, "meta": true, "slots": ["head"], "effect_identifier": "crit_dmg_meta"},
+        "213743": {"min": 1, "max": 1, "slots": ["head"], "effect_identifier": "tww_diamond_crit"}
     },
-    "enchants": {}
+    "enchants": {
+        "finger1": [{"name": "Accord of Haste", "id": 6109},{"name": "Accord of Versatility", "id": 6111}],
+        "finger2": [{"name": "Accord of Haste", "id": 6109},{"name": "Accord of Versatility", "id": 6111}]
+    }
 }

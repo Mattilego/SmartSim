@@ -15,6 +15,7 @@ import glob
 import math
 import subprocess
 from collections import defaultdict
+from functools import lru_cache
 
 # ---------- Constants ----------
 CLASSES = [
@@ -27,6 +28,575 @@ SLOTS = [
     "finger1", "finger2", "trinket1", "trinket2",
     "main_hand", "off_hand", "1_hand", "2_hand"
 ]
+EXCLUDED_STATS = {
+    "stamina",
+    "spirit",
+    "health",
+    "mana",
+    "mana regen",
+    "armor",
+    "run speed",
+    "rune",
+    "runic power",
+    "tank-dodge",
+    "tank-parry",
+    "tank-block",
+    "tank-crit",
+    "leech"
+}
+
+from collections import Counter, defaultdict  # add Counter to imports
+
+def _split_gems(item_str):
+    """Yield gem ids from an item string without building a list per call."""
+    for part in item_str.split(','):
+        if part.startswith('gem_id='):
+            return part[7:].split('/')
+    return ()
+
+def _get_enchant_id(item_str):
+    """Return the enchant id (as a string) from an item string, or None."""
+    for part in item_str.split(','):
+        if part.startswith('enchant_id='):
+            return part[11:]
+    return None
+
+def _prune_slot_items(items, slot, simc_path):
+    """
+    Drop items that are strictly dominated by another item in the same slot.
+
+    Two items are only comparable when they share:
+      - the same effect_identifier (from the item string), and
+      - the same socket count.
+
+    Otherwise the extra sockets / effect would make the comparison invalid.
+    """
+    if not items:
+        return items
+
+    groups = defaultdict(list)
+    for item in items:
+        item_str = format_item_string(item)
+        stats, eff = get_item_stats_and_effect(slot, item_str, simc_path)
+        groups[(eff, get_socket_count(item))].append((stats, item))
+
+    kept = []
+    for _, group in groups.items():
+        if len(group) <= 1:
+            kept.extend(it for _, it in group)
+            continue
+        # Collect varying stat names for this group.
+        varying = set()
+        for stats, _ in group:
+            varying.update(stats.keys())
+        stat_names = sorted(
+            n for n in varying
+            if min(s.get(n, 0) for s, _ in group) !=
+               max(s.get(n, 0) for s, _ in group)
+        )
+        if not stat_names:
+            # All identical — keep one.
+            kept.append(group[0][1])
+            continue
+
+        vecs = []
+        for stats, item in group:
+            vec = tuple(stats.get(n, 0) for n in stat_names)
+            vecs.append((vec, item))
+
+        for i, (vi, item_i) in enumerate(vecs):
+            dominated = False
+            for j, (vj, item_j) in enumerate(vecs):
+                if i == j:
+                    continue
+                # vj dominates vi if it is >= in every varying stat and
+                # strictly greater in at least one.
+                if all(a >= b for a, b in zip(vj, vi)) and vj != vi:
+                    dominated = True
+                    break
+            if not dominated:
+                kept.append(item_i)
+    return kept
+
+
+def precompute_lookup_tables(profile_data, simc_path, gems_settings, enchants_settings):
+    """
+    Build flat lookup dicts so the per-combo loop is pure dict lookups.
+
+    Returns:
+        item_stats:  slot -> item_str -> (Counter(stats), effect_id)
+        gem_stats:   gem_id -> (Counter(stats), effect_id)
+        ench_stats:  (slot, enchant_id_str) -> (Counter(stats), effect_id)
+    """
+    item_stats = defaultdict(dict)
+    gem_stats = {}
+    ench_stats = {}
+
+    # Items (use the pruned pool so we don't pay SimC cost for losers).
+    for slot in SLOTS:
+        raw = collect_items_for_slot(slot, profile_data)
+        kept = _prune_slot_items(raw, slot, simc_path)
+        for item in kept:
+            s = format_item_string(item)
+            stats, eff = get_item_stats_and_effect(slot, s, simc_path)
+            item_stats[slot][normalize_item_string(s)] = (Counter(stats), eff)
+
+    # Enchants.
+    for slot, specs in enchants_settings.items():
+        for spec in specs:
+            eid = spec["id"]
+            stats, eff = get_enchant_stats_and_effect(
+                eid, slot, simc_path, spec.get("effect_identifier", "")
+            )
+            ench_stats[(slot, str(eid))] = (Counter(stats), eff)
+
+    # Gems.
+    for gid, spec in gems_settings.items():
+        stats, eff = get_gem_stats_and_effect(
+            gid, simc_path, spec.get("effect_identifier", "")
+        )
+        gem_stats[gid] = (Counter(stats), eff)
+
+    return item_stats, gem_stats, ench_stats
+
+
+@lru_cache(maxsize=None)
+def _placements_for_signature(sig, gems_key):
+    """Cached gem placements keyed on the socket signature + gem settings."""
+    sockets = list(sig)
+    if not sockets:
+        return ({},)
+
+    meta_sockets = [s for s in sockets if s[2]]
+    non_meta_sockets = [s for s in sockets if not s[2]]
+    total_meta_sockets = len(meta_sockets)
+    total_non_meta_sockets = len(non_meta_sockets)
+
+    gem_ids = [g for g, *_ in gems_key]
+    if not gem_ids:
+        return ({},)
+    gems_settings = {g: {"min": mn, "max": mx, "meta": meta, "slots": list(sl)}
+                     for g, mn, mx, meta, sl in gems_key}
+
+    vectors = []
+    def dfs(gem_idx, remaining, counts, meta_used):
+        if gem_idx == len(gem_ids):
+            if remaining == 0:
+                vectors.append(counts.copy())
+            return
+        gid = gem_ids[gem_idx]
+        spec = gems_settings[gid]
+        min_c = spec['min']
+        max_c = spec['max']
+        if max_c == -1:
+            max_c = remaining
+        else:
+            max_c = min(max_c, remaining)
+        if spec['meta']:
+            max_c = min(max_c, 1)
+            if meta_used:
+                max_c = 0
+        for cnt in range(min_c, max_c + 1):
+            counts[gid] = cnt
+            dfs(gem_idx + 1, remaining - cnt, counts,
+                meta_used or (spec['meta'] and cnt > 0))
+        counts.pop(gid, None)
+
+    dfs(0, len(sockets), {}, False)
+
+    out = []
+    for vec in vectors:
+        total_meta = sum(c for g, c in vec.items() if gems_settings[g]['meta'])
+        total_non_meta = sum(c for g, c in vec.items() if not gems_settings[g]['meta'])
+        if total_meta > total_meta_sockets or total_non_meta > total_non_meta_sockets:
+            continue
+
+        items = [(g, c) for g, c in vec.items() if c > 0]
+        items.sort(key=lambda x: (
+            -(1 if gems_settings[x[0]]['meta'] else 0),
+            -len(gems_settings[x[0]]['slots'])
+        ))
+
+        meta_pool = meta_sockets[:]
+        non_meta_pool = non_meta_sockets[:]
+        placement = {}
+        for gid, count in items:
+            spec = gems_settings[gid]
+            is_meta = spec['meta']
+            pref = ['head'] if is_meta else spec['slots']
+            pool = meta_pool if is_meta else non_meta_pool
+            placed = 0
+            for entry in pool[:]:
+                if placed >= count:
+                    break
+                if entry[0] in pref:
+                    placement[(entry[0], entry[1])] = gid
+                    pool.remove(entry)
+                    placed += 1
+            if placed < count:
+                for entry in pool[:]:
+                    if placed >= count:
+                        break
+                    placement[(entry[0], entry[1])] = gid
+                    pool.remove(entry)
+                    placed += 1
+            if placed < count:
+                break
+        else:
+            out.append(placement)
+    return tuple(out)
+
+def _build_effect_key(effect_ids):
+    """
+    Build a hashable key from a list of effect identifiers.
+
+    Fast path: if no effect id starts with '_', we just need a frozenset
+    (duplicates are collapsed automatically).
+    Slow path: '_'-prefixed ids keep their occurrence count.
+    """
+    non_empty = [eff for eff in effect_ids if eff]
+    if not non_empty:
+        return frozenset()
+
+    for eff in non_empty:
+        if eff.startswith('_'):
+            break
+    else:
+        # No '_'-prefixed effect at all
+        return frozenset(non_empty)
+
+    counts = Counter(non_empty)
+    normalized = set()
+    for eff, cnt in counts.items():
+        if eff.startswith('_'):
+            normalized.add((eff, cnt))
+        else:
+            normalized.add((eff, 1))
+    return frozenset(normalized)
+
+def _parse_stats_from_html(html_path):
+    """
+    Parse the '<div class="player-section stats">...<table>...</table>' section
+    from a SimC HTML dump and return a {stat_name: value} dict.
+    """
+    try:
+        with open(html_path, "r", encoding="utf-8") as f:
+            html_content = f.read()
+    except FileNotFoundError:
+        return {}
+
+    stats = {}
+    stats_section_match = re.search(
+        r'<div class="player-section stats">.*?<table.*?>(.*?)</table>',
+        html_content,
+        re.DOTALL
+    )
+    if not stats_section_match:
+        return {}
+
+    table_content = stats_section_match.group(1)
+    row_pattern = re.compile(r'<tr[^>]*>(.*?)</tr>', re.DOTALL)
+    for row_match in row_pattern.finditer(table_content):
+        row_html = row_match.group(1)
+        th_match = re.search(r'<th class="left">([^<]+)</th>', row_html)
+        if not th_match:
+            continue
+        stat_name = th_match.group(1).strip()
+
+        if stat_name.lower() in EXCLUDED_STATS:
+            continue
+
+        td_matches = re.findall(r'<td[^>]*>(.*?)</td>', row_html, re.DOTALL)
+        if not td_matches:
+            continue
+        last_val = td_matches[-1].strip()
+        last_val = re.sub(r'<[^>]+>', '', last_val)
+        last_val = last_val.replace('%', '').replace('(', '').replace(')', '').strip()
+        num_match = re.search(r'(-?\d+(?:\.\d+)?)', last_val)
+        if num_match:
+            val = float(num_match.group(1))
+            if val.is_integer():
+                val = int(val)
+            stats[stat_name] = val
+        else:
+            stats[stat_name] = 0
+    return stats
+
+def _parse_weapon_from_html(html_path):
+    """
+    Parse a weapon line like:
+      weapon: { 10 - 14, 3.6 }
+    and return (min_damage, max_damage, speed) as floats.
+    Returns None if no weapon block is found.
+    """
+    try:
+        with open(html_path, "r", encoding="utf-8") as f:
+            html_content = f.read()
+    except FileNotFoundError:
+        return None
+
+    m = re.search(
+        r'weapon:\s*\{\s*([\d.]+)\s*-\s*([\d.]+)\s*,\s*([\d.]+)\s*\}',
+        html_content
+    )
+    if not m:
+        return None
+
+    return float(m.group(1)), float(m.group(2)), float(m.group(3))
+
+def normalize_item_string(item_str):
+    """
+    Remove gem_id and enchant_id fields from an item string.
+    These are overridden by the SimC call anyway, so they should not
+    affect the cached result.
+    """
+    parts = item_str.split(',')
+    filtered = [parts[0]]  # base item
+    for part in parts[1:]:
+        if part.startswith('gem_id=') or part.startswith('enchant_id='):
+            continue
+        filtered.append(part)
+    return ','.join(filtered)
+
+@lru_cache(maxsize=None)
+def _get_item_stats_and_effect_cached(slot, item_str, simc_path):
+    """
+    Cached version. `item_str` must be normalized (no gem_id/enchant_id).
+    Runs SimC and extracts gear stats.
+    Returns (stats_dict, effect_id) where effect_id is the value of
+    effect_identifier= in the item string, or an empty string if absent.
+    """
+    # Extract effect_identifier from the item string (if present)
+    effect_id = ""
+    for part in item_str.split(','):
+        part = part.strip()
+        if part.startswith('effect_identifier='):
+            effect_id = part.split('=', 1)[1].strip()
+            break
+
+    # Map internal slot names to the ones used in the .simc template
+    slot_map = {
+        "shoulder": "shoulders",
+        "2_hand": "main_hand",
+        "1_hand": "main_hand"
+    }
+    template_slot = slot_map.get(slot, slot)
+
+    # Build the .simc content (fixed enchant and gems are appended)
+    lines = [
+        "input=profile.simc",
+        "head=,",
+        "neck=,",
+        "shoulders=,",
+        "chest=,",
+        "waist=,",
+        "legs=,",
+        "feet=,",
+        "wrists=,",
+        "hands=,",
+        "finger1=,",
+        "finger2=,",
+        "trinket1=,",
+        "trinket2=,",
+        "back=,",
+        "main_hand=,",
+        "off_hand=,",
+        f"{template_slot}={item_str},enchant_id=2503,gem_id=32198/32198/32198/32198",
+        "max_time=1",
+        "html=gear_test.html"
+    ]
+    content = "\n".join(lines) + "\n"
+
+    with open("gear_test.simc", "w", encoding="utf-8") as f:
+        f.write(content)
+
+    # Run SimC
+    cmd = [simc_path, "gear_test.simc"]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as e:
+        print(f"SimC error (stderr):\n{e.stderr}")
+        return {}, effect_id
+
+    stats = _parse_stats_from_html("gear_test.html")
+
+    # --- weapon damage / speed handling ---
+    weapon_info = _parse_weapon_from_html("gear_test.html")
+    if weapon_info:
+        min_dmg, max_dmg, speed = weapon_info
+        avg_damage = (min_dmg + max_dmg) / 2.0
+        if speed > 0:
+            dps = avg_damage / speed
+            stats["DPS"] = stats.get("DPS", 0.0) + dps
+
+        # Treat speed as an effect so different weapon speeds are not merged
+        speed_str = f"speed={speed}"
+        if effect_id:
+            effect_id = f"{effect_id}|{speed_str}"
+        else:
+            effect_id = speed_str
+
+    print(slot, stats, effect_id)
+    return stats, effect_id
+
+def get_item_stats_and_effect(slot, item_str, simc_path):
+    """
+    Public wrapper that normalizes the item string before calling the cached function.
+    """
+    normalized = normalize_item_string(item_str)
+    return _get_item_stats_and_effect_cached(slot, normalized, simc_path)
+
+@lru_cache(maxsize=None)
+def get_gem_stats_and_effect(gem_id, simc_path, effect_identifier=""):
+    """
+    Given a gem ID (string), return (stats_dict, effect_id).
+
+    Runs SimC with a dummy head item (id=8754, ilevel=1) socketed with the gem.
+    The dummy item contributes 0 stats, so what we parse is the
+    gem's contribution. The effect_id is supplied by the caller (from
+    settings.json -> gems[id].effect_identifier) and returned unchanged.
+    """
+    if not gem_id:
+        return {}, effect_identifier
+
+    lines = [
+        "input=profile.simc",
+        "head=,",
+        "neck=,",
+        "shoulders=,",
+        "chest=,",
+        "waist=,",
+        "legs=,",
+        "feet=,",
+        "wrists=,",
+        "hands=,",
+        "finger1=,",
+        "finger2=,",
+        "trinket1=,",
+        "trinket2=,",
+        "back=,",
+        "main_hand=,",
+        "off_hand=,",
+        f"head=,id=8754,ilevel=1,gem_id={gem_id}",
+        "max_time=1",
+        "html=gem_test.html"
+    ]
+    content = "\n".join(lines) + "\n"
+
+    with open("gem_test.simc", "w", encoding="utf-8") as f:
+        f.write(content)
+
+    cmd = [simc_path, "gem_test.simc"]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as e:
+        print(f"SimC error (stderr):\n{e.stderr}")
+        return {}, effect_identifier
+
+    stats = _parse_stats_from_html("gem_test.html")
+    print("gem", gem_id, stats)
+    return stats, effect_identifier
+# ------------------------------------------------------------
+
+@lru_cache(maxsize=None)
+def get_enchant_stats_and_effect(enchant_id, slot, simc_path, effect_identifier=""):
+    """
+    Given an enchant ID and the slot it's applied to, return (stats_dict, effect_id).
+
+    Runs SimC with the same helm dummy item used for gem testing, with the
+    enchant applied to the given slot. The dummy item contributes ~0 stats,
+    so what we parse is essentially the enchant's contribution. The effect_id
+    is supplied by the caller (from settings.json -> enchants[slot][*].effect_identifier)
+    and returned unchanged.
+    """
+    if not enchant_id:
+        return {}, effect_identifier
+
+    slot_map = {
+        "shoulder": "shoulders",
+    }
+    template_slot = slot_map.get(slot, slot)
+
+    # Always use the same helm dummy item as the gem test, so the enchant's
+    # contribution dominates and the baseline is consistent across slots.
+    dummy_item = "id=8754,ilevel=1"
+
+    lines = [
+        "input=profile.simc",
+        "head=,",
+        "neck=,",
+        "shoulders=,",
+        "chest=,",
+        "waist=,",
+        "legs=,",
+        "feet=,",
+        "wrists=,",
+        "hands=,",
+        "finger1=,",
+        "finger2=,",
+        "trinket1=,",
+        "trinket2=,",
+        "back=,",
+        "main_hand=,",
+        "off_hand=,",
+        f"{template_slot}=,{dummy_item},enchant_id={enchant_id}",
+        "max_time=1",
+        "html=enchant_test.html",
+    ]
+    content = "\n".join(lines) + "\n"
+
+    with open("enchant_test.simc", "w", encoding="utf-8") as f:
+        f.write(content)
+
+    cmd = [simc_path, "enchant_test.simc"]
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as e:
+        print(f"SimC error (stderr):\n{e.stderr}")
+        return {}, effect_identifier
+
+    stats = _parse_stats_from_html("enchant_test.html")
+    print("enchant", enchant_id, slot, stats)
+    return stats, effect_identifier
+
+def compute_combo_stats_and_effect(slot_items, item_stats, gem_stats, ench_stats):
+    total_stats = Counter()
+    effect_ids = []
+
+    for slot, item_str in slot_items.items():
+        entry = item_stats.get(slot, {}).get(normalize_item_string(item_str))
+        if entry is None:
+            # Fallback (shouldn't happen if pruning kept it) — skip silently.
+            continue
+        stats, eff = entry
+        if stats:
+            total_stats.update(stats)
+        if eff:
+            effect_ids.append(eff)
+
+        for gem_id in _split_gems(item_str):
+            if not gem_id:
+                continue
+            g_entry = gem_stats.get(gem_id)
+            if g_entry is None:
+                continue
+            g_stats, g_eff = g_entry
+            if g_stats:
+                total_stats.update(g_stats)
+            if g_eff:
+                effect_ids.append(g_eff)
+
+        ench_id = _get_enchant_id(item_str)
+        if ench_id is not None:
+            e_entry = ench_stats.get((slot, ench_id))
+            if e_entry is not None:
+                e_stats, e_eff = e_entry
+                if e_stats:
+                    total_stats.update(e_stats)
+                if e_eff:
+                    effect_ids.append(e_eff)
+
+    return dict(total_stats), _build_effect_key(effect_ids)
 
 def get_item_id(item):
     return item.get("fields", {}).get("id") if item else None
@@ -72,7 +642,16 @@ def delete_checkpoint():
 def cleanup_previous_runs(profile_dir="profiles"):
     if os.path.exists(profile_dir):
         shutil.rmtree(profile_dir)
-    patterns = ["batch_*.simc", "results_*.json"]
+    patterns = [
+        "batch_*.simc",
+        "results_*.json",
+        "gear_test.simc",
+        "gear_test.html",
+        "gem_test.simc",
+        "gem_test.html",
+        "enchant_test.simc",
+        "enchant_test.html",
+    ]
     for pat in patterns:
         for f in glob.glob(pat):
             os.remove(f)
@@ -150,15 +729,36 @@ def parse_settings(file_path):
             "min": spec.get("min", 0),
             "max": spec.get("max", -1),
             "slots": spec.get("slots", []),
-            "meta": spec.get("meta", False)
+            "meta": spec.get("meta", False),
+            "effect_identifier": spec.get("effect_identifier", "") or ""
         }
     data["gems"] = processed_gems
     for slot, vals in data["enchants"].items():
-        if not isinstance(vals, list) or not all(isinstance(v, int) for v in vals):
-            raise ValueError(f"Enchant values for '{slot}' must be a list of integers")
+        if not isinstance(vals, list):
+            raise ValueError(f"Enchant values for '{slot}' must be a list")
+        processed = []
+        for v in vals:
+            if isinstance(v, int):
+                processed.append({"id": v, "effect_identifier": ""})
+            elif isinstance(v, dict):
+                if "id" not in v:
+                    raise ValueError(f"Enchant entry for '{slot}' must contain 'id'")
+                processed.append({
+                    "id": v["id"],
+                    "effect_identifier": v.get("effect_identifier", "") or ""
+                })
+            else:
+                raise ValueError(
+                    f"Enchant entry for '{slot}' must be int or object, got {type(v).__name__}"
+                )
+        data["enchants"][slot] = processed
+    filter_dominated = data.get("filter_dominated_combinations", False)
+    if not isinstance(filter_dominated, bool):
+        raise ValueError("filter_dominated_combinations must be true or false")
+    data["filter_dominated_combinations"] = filter_dominated
     return data
 
-# ---------- Item Handling ----------
+@lru_cache(maxsize=None)
 def parse_item_string(s):
     if not s:
         return None
@@ -208,22 +808,28 @@ def collect_items_for_slot(slot, profile_data):
     return [it for it in items if it is not None]
 
 def generate_gear_combinations(profile_data):
-    normal_slots = [s for s in SLOTS if s not in ('main_hand','off_hand','1_hand','2_hand',
-                                                  'finger1','finger2','trinket1','trinket2')]
+    normal_slots = [
+        s for s in SLOTS
+        if s not in ('main_hand', 'off_hand', '1_hand', '2_hand',
+                     'finger1', 'finger2', 'trinket1', 'trinket2')
+    ]
     normal_options = {}
     for slot in normal_slots:
         opts = collect_items_for_slot(slot, profile_data)
         normal_options[slot] = opts if opts else [None]
 
-    finger_pool = collect_items_for_slot('finger1', profile_data) + collect_items_for_slot('finger2', profile_data)
-    finger_combos = []
+    # --- Fingers: pre-build the list of dicts once ---
+    finger_pool = (collect_items_for_slot('finger1', profile_data)
+                   + collect_items_for_slot('finger2', profile_data))
+    finger_dicts = []
     if len(finger_pool) >= 2:
         for i in range(len(finger_pool)):
-            for j in range(i+1, len(finger_pool)):
-                a, b = finger_pool[i], finger_pool[j]
+            a = finger_pool[i]
+            for j in range(i + 1, len(finger_pool)):
+                b = finger_pool[j]
                 if get_item_id(a) == get_item_id(b):
                     continue
-                finger_combos.append(('finger1', a, 'finger2', b))
+                finger_dicts.append({'finger1': a, 'finger2': b})
     else:
         f1 = collect_items_for_slot('finger1', profile_data) or [None]
         f2 = collect_items_for_slot('finger2', profile_data) or [None]
@@ -233,17 +839,20 @@ def generate_gear_combinations(profile_data):
                     continue
                 if get_item_id(a) == get_item_id(b):
                     continue
-                finger_combos.append(('finger1', a, 'finger2', b))
+                finger_dicts.append({'finger1': a, 'finger2': b})
 
-    trinket_pool = collect_items_for_slot('trinket1', profile_data) + collect_items_for_slot('trinket2', profile_data)
-    trinket_combos = []
+    # --- Trinkets: same treatment ---
+    trinket_pool = (collect_items_for_slot('trinket1', profile_data)
+                    + collect_items_for_slot('trinket2', profile_data))
+    trinket_dicts = []
     if len(trinket_pool) >= 2:
         for i in range(len(trinket_pool)):
-            for j in range(i+1, len(trinket_pool)):
-                a, b = trinket_pool[i], trinket_pool[j]
+            a = trinket_pool[i]
+            for j in range(i + 1, len(trinket_pool)):
+                b = trinket_pool[j]
                 if get_item_id(a) == get_item_id(b):
                     continue
-                trinket_combos.append(('trinket1', a, 'trinket2', b))
+                trinket_dicts.append({'trinket1': a, 'trinket2': b})
     else:
         t1 = collect_items_for_slot('trinket1', profile_data) or [None]
         t2 = collect_items_for_slot('trinket2', profile_data) or [None]
@@ -253,42 +862,43 @@ def generate_gear_combinations(profile_data):
                     continue
                 if get_item_id(a) == get_item_id(b):
                     continue
-                trinket_combos.append(('trinket1', a, 'trinket2', b))
+                trinket_dicts.append({'trinket1': a, 'trinket2': b})
 
+    # --- Weapons: pre-build dicts, already free of None values ---
     two_hand_pool = collect_items_for_slot('2_hand', profile_data)
-    main_pool = collect_items_for_slot('main_hand', profile_data) + collect_items_for_slot('1_hand', profile_data)
-    off_pool = collect_items_for_slot('off_hand', profile_data) + collect_items_for_slot('1_hand', profile_data)
+    main_pool = (collect_items_for_slot('main_hand', profile_data)
+                 + collect_items_for_slot('1_hand', profile_data))
+    off_pool = (collect_items_for_slot('off_hand', profile_data)
+                + collect_items_for_slot('1_hand', profile_data))
 
-    weapon_combos = []
+    weapon_dicts = []
     for item in two_hand_pool:
         if item is not None:
-            weapon_combos.append(('main_hand', item, 'off_hand', None))
+            weapon_dicts.append({'main_hand': item})
     for m in main_pool:
         for o in off_pool:
             if m is None or o is None:
                 continue
             if get_item_id(m) == get_item_id(o):
                 continue
-            weapon_combos.append(('main_hand', m, 'off_hand', o))
-    if not weapon_combos:
-        weapon_combos.append(('main_hand', None, 'off_hand', None))
+            weapon_dicts.append({'main_hand': m, 'off_hand': o})
+    if not weapon_dicts:
+        weapon_dicts.append({})
 
-    normal_product = itertools.product(*(normal_options[s] for s in normal_slots))
+    # --- Main loop: dict merge instead of update() ---
+    normal_product = itertools.product(
+        *(normal_options[s] for s in normal_slots)
+    )
+    extra_combos = []
+    for f in finger_dicts:
+        for t in trinket_dicts:
+            for w in weapon_dicts:
+                extra_combos.append({**f, **t, **w})
+
     for normal_items in normal_product:
-        normal_dict = dict(zip(normal_slots, normal_items))
-        for finger_combo in finger_combos:
-            finger_dict = {finger_combo[0]: finger_combo[1], finger_combo[2]: finger_combo[3]}
-            for trinket_combo in trinket_combos:
-                trinket_dict = {trinket_combo[0]: trinket_combo[1], trinket_combo[2]: trinket_combo[3]}
-                for w_combo in weapon_combos:
-                    weapon_dict = {w_combo[0]: w_combo[1], w_combo[2]: w_combo[3]}
-                    combo = {}
-                    combo.update(normal_dict)
-                    combo.update(finger_dict)
-                    combo.update(trinket_dict)
-                    combo.update(weapon_dict)
-                    combo = {k: v for k, v in combo.items() if v is not None}
-                    yield combo
+        normal_dict = {s: v for s, v in zip(normal_slots, normal_items) if v is not None}
+        for extra in extra_combos:
+            yield {**normal_dict, **extra}
 
 # ---------- Gem Placement ----------
 def get_sockets(gear_combo, gems_settings):
@@ -306,104 +916,155 @@ def get_sockets(gear_combo, gems_settings):
 
 def generate_gem_placements(gear_combo, gems_settings):
     sockets = get_sockets(gear_combo, gems_settings)
-    if not sockets:
+    sig = tuple(sorted(sockets))
+    gems_key = tuple(sorted(
+        (g, s.get('min', 0), s.get('max', -1), s.get('meta', False),
+         tuple(s.get('slots', ())))
+        for g, s in gems_settings.items()
+    ))
+    for placement in _placements_for_signature(sig, gems_key):
+        yield placement
+
+def generate_enchant_combinations(gear_combo, enchants_settings):
+    slots_with_enchants = [s for s in gear_combo if s in enchants_settings]
+    if not slots_with_enchants:
         yield {}
         return
+    options_per_slot = {s: [None] + enchants_settings[s] for s in slots_with_enchants}
+    for combo in itertools.product(*(options_per_slot[s] for s in slots_with_enchants)):
+        yield dict(zip(slots_with_enchants, combo))
 
-    meta_sockets = [s for s in sockets if s[2]]
-    non_meta_sockets = [s for s in sockets if not s[2]]
-    total_meta_sockets = len(meta_sockets)
-    total_non_meta_sockets = len(non_meta_sockets)
+def filter_combinations(combos):
+    """
+    combos: iterable of (stats_dict, effect_id, payload) triples.
+    Returns list of payloads (one per surviving non-dominated combo).
+    """
+    groups = defaultdict(list)
+    for stats, effect_id, payload in combos:
+        groups[effect_id].append((stats, payload))
 
-    gem_ids = list(gems_settings.keys())
-    if not gem_ids:
-        yield {}
-        return
+    try:
+        import numpy as np
+    except ImportError:
+        np = None
 
-    vectors = []
-    def dfs(gem_idx, remaining, counts, meta_used):
-        if gem_idx == len(gem_ids):
-            if remaining == 0:
-                vectors.append(counts.copy())
-            return
-        gid = gem_ids[gem_idx]
-        spec = gems_settings[gid]
-        min_c = spec.get('min', 0)
-        max_c = spec.get('max', -1)
-        if max_c == -1:
-            max_c = remaining
-        else:
-            max_c = min(max_c, remaining)
-        if spec.get('meta', False):
-            max_c = min(max_c, 1)
-            if meta_used:
-                max_c = 0
-        for cnt in range(min_c, max_c + 1):
-            counts[gid] = cnt
-            dfs(gem_idx + 1, remaining - cnt, counts, meta_used or (spec.get('meta', False) and cnt > 0))
-        counts.pop(gid, None)
+    n_input = sum(len(g) for g in groups.values())
+    n_groups = len(groups)
+    t0 = time.time()
+    print(
+        f"Filtering {n_input} unique combinations across {n_groups} effect group(s)...",
+        flush=True,
+    )
 
-    dfs(0, len(sockets), {}, False)
+    filtered = []
 
-    for vec in vectors:
-        total_meta = sum(cnt for gid, cnt in vec.items() if gems_settings[gid].get("meta", False))
-        total_non_meta = sum(cnt for gid, cnt in vec.items() if not gems_settings[gid].get("meta", False))
-        if total_meta > total_meta_sockets or total_non_meta > total_non_meta_sockets:
+    for group_i, (_effect_id, group) in enumerate(groups.items(), start=1):
+        if not group:
             continue
 
-        items = [(gid, cnt) for gid, cnt in vec.items() if cnt > 0]
-        items.sort(key=lambda x: (
-            - (1 if gems_settings[x[0]].get('meta', False) else 0),
-            - len(gems_settings[x[0]].get('slots', []))
-        ))
+        n_before_dedup = len(group)
+        kept_before = len(filtered)
 
-        meta_socket_pool = meta_sockets[:]
-        non_meta_socket_pool = non_meta_sockets[:]
+        # --- 1. Deduplicate by exact stat vector -------------------------
+        seen_stats = set()
+        deduped = []
+        for stats, payload in group:
+            # Create a hashable key from the stats dict
+            key = tuple(sorted(stats.items()))
+            if key in seen_stats:
+                continue
+            seen_stats.add(key)
+            deduped.append((stats, payload))
+        group = deduped
 
-        placement = {}
-        for gid, count in items:
-            spec = gems_settings[gid]
-            is_meta = spec.get('meta', False)
-            pref_slots = spec.get('slots', [])
-            if is_meta:
-                pref_slots = ['head']
-                pool = meta_socket_pool
-            else:
-                pool = non_meta_socket_pool
-
-            placed = 0
-            for slot, idx, _ in pool[:]:
-                if placed >= count:
-                    break
-                if slot in pref_slots:
-                    placement[(slot, idx)] = gid
-                    pool.remove((slot, idx, True if is_meta else False))
-                    placed += 1
-            if placed < count:
-                for slot, idx, _ in pool[:]:
-                    if placed >= count:
-                        break
-                    placement[(slot, idx)] = gid
-                    pool.remove((slot, idx, True if is_meta else False))
-                    placed += 1
-            if placed < count:
-                break
+        if len(group) == 1:
+            filtered.append(group[0][1])
         else:
-            yield placement
+            # --- 2. Collect all stat names and remove constants ----------
+            all_stats = set()
+            for stats, _ in group:
+                all_stats.update(stats.keys())
 
-# ---------- Enchant Combinations ----------
-def generate_enchant_combinations(gear_combo, enchants_settings):
-    slots_with_items = list(gear_combo.keys())
-    options_per_slot = {}
-    for slot in slots_with_items:
-        opts = [None]
-        if slot in enchants_settings:
-            opts.extend(enchants_settings[slot])
-        options_per_slot[slot] = opts
-    for combo in itertools.product(*(options_per_slot[s] for s in slots_with_items)):
-        yield dict(zip(slots_with_items, combo))
+            # Determine which stats vary within this group
+            varying_stats = []
+            for name in all_stats:
+                vals = [s.get(name, 0) for s, _ in group]
+                if min(vals) != max(vals):
+                    varying_stats.append(name)
 
-# ---------- Main Generator (minimal profileset files) ----------
+            # If no varying stats, all combos are identical in stats
+            if not varying_stats:
+                filtered.append(group[0][1])
+            else:
+                stat_names = sorted(varying_stats)
+                n_stats = len(stat_names)
+                n = len(group)
+
+                # --- 3. Build numpy matrix -------------------------------
+                if np is not None and n > 32:
+                    # Use float32 for speed; stats are usually small integers/floats
+                    mat = np.empty((n, n_stats), dtype=np.float32)
+                    for i, (s, _) in enumerate(group):
+                        row = mat[i]
+                        for j, name in enumerate(stat_names):
+                            row[j] = s.get(name, 0)
+
+                    # Sort by total sum descending
+                    order = np.argsort(-mat.sum(axis=1), kind='stable')
+
+                    keep_arr = np.empty_like(mat)
+                    keep_indices = []
+                    count = 0
+
+                    # Optional: block candidates to reduce Python loop overhead
+                    # Here we keep the simple per-candidate loop; it's already fast.
+                    for idx in order:
+                        vec = mat[idx]
+                        if count:
+                            sub = keep_arr[:count]
+                            # Check if any kept vector dominates vec
+                            if np.any(np.all(sub >= vec, axis=1)):
+                                continue
+                        keep_arr[count] = vec
+                        keep_indices.append(idx)
+                        count += 1
+
+                    for idx in keep_indices:
+                        filtered.append(group[idx][1])
+                else:
+                    # --- Pure-Python fallback (unchanged) ----------------
+                    entries = []
+                    for stats, payload in group:
+                        vec = tuple(stats.get(name, 0) for name in stat_names)
+                        entries.append((sum(vec), vec, payload))
+                    entries.sort(key=lambda e: e[0], reverse=True)
+
+                    keep_vecs = []
+                    for _total, vec, payload in entries:
+                        dominated = False
+                        for fvec in keep_vecs:
+                            if all(fvec[k] >= vec[k] for k in range(n_stats)):
+                                dominated = True
+                                break
+                        if not dominated:
+                            keep_vecs.append(vec)
+                            filtered.append(payload)
+
+        kept = len(filtered) - kept_before
+        if n_before_dedup >= 100 or group_i == n_groups or group_i % 10 == 0:
+            print(
+                f"  Group {group_i}/{n_groups}: {n_before_dedup} combos -> {kept} kept "
+                f"({len(filtered)} total, {time.time() - t0:.1f}s)",
+                flush=True,
+            )
+
+    print(
+        f"Filter complete: {len(filtered)}/{n_input} combinations kept "
+        f"in {time.time() - t0:.1f}s",
+        flush=True,
+    )
+    return filtered
+
 def generate_profiles(profile_file, settings_file, output_dir):
     os.makedirs(output_dir, exist_ok=True)
 
@@ -411,70 +1072,124 @@ def generate_profiles(profile_file, settings_file, output_dir):
     settings_data = parse_settings(settings_file)
     gems_settings = settings_data.get('gems', {})
     enchants_settings = settings_data.get('enchants', {})
+    filter_dominated = settings_data.get('filter_dominated_combinations', True)
 
     base_path = os.path.join(output_dir, "profile_0.simc")
     with open(base_path, 'w', encoding='utf-8') as f:
         f.write("")
-    descriptions = {0: "base gear (no changes)"}
+        simc_path = settings_data.get('simc_path')
 
-    gear_combos = list(generate_gear_combinations(profile_data))
-    combo_counter = 1
+    # ---- Precompute ----
+    print("Pruning items and precomputing stat tables...", flush=True)
+    pre_t0 = time.time()
+    item_stats, gem_stats, ench_stats = precompute_lookup_tables(
+        profile_data, simc_path, gems_settings, enchants_settings
+    )
+    print(
+        f"  {sum(len(v) for v in item_stats.values())} items kept across "
+        f"{len(item_stats)} slots, {len(gem_stats)} gems, "
+        f"{len(ench_stats)} enchants ({time.time() - pre_t0:.1f}s)",
+        flush=True,
+    )
+
+    # Compact records: (stats_dict, effect_id, changes_dict).
+    # We deliberately do NOT keep slot_items around after computing changes.
+    combo_list = []
     seen = set()
 
-    for gear_combo in gear_combos:
-        gem_placements = list(generate_gem_placements(gear_combo, gems_settings))
-        for gem_placement in gem_placements:
-            enchant_combos = list(generate_enchant_combinations(gear_combo, enchants_settings))
-            for enchant_assignment in enchant_combos:
-                final_gear = []
-                slot_items = {}
+    compute_stats = compute_combo_stats_and_effect
 
+    print("Generating gear/gem/enchant combinations...", flush=True)
+    gen_t0 = time.time()
+    considered = 0
+    skipped = 0
+    last_report = gen_t0
+    report_every = 1000 if filter_dominated else 25000
+
+    for gear_combo in generate_gear_combinations(profile_data):
+        for gem_placement in generate_gem_placements(gear_combo, gems_settings):
+            for enchant_assignment in generate_enchant_combinations(gear_combo, enchants_settings):
+                considered += 1
+                slot_items = {}
                 for slot, item in gear_combo.items():
                     new_item = {
                         "base": item["base"],
                         "fields": item["fields"].copy()
                     }
-
                     num_sockets = get_socket_count(item)
-                    slot_gems = []
-                    for idx in range(num_sockets):
-                        gid = gem_placement.get((slot, idx))
-                        slot_gems.append(gid)
+                    slot_gems = [gem_placement.get((slot, idx))
+                                 for idx in range(num_sockets)]
                     if any(g is not None for g in slot_gems):
                         set_gems(new_item, slot_gems)
+                    enchant_spec = enchant_assignment.get(slot)
+                    if enchant_spec is not None:
+                        set_enchant(new_item, enchant_spec["id"])
+                    slot_items[slot] = format_item_string(new_item)
 
-                    enchant = enchant_assignment.get(slot)
-                    if enchant is not None:
-                        set_enchant(new_item, enchant)
-
-                    formatted = format_item_string(new_item)
-                    slot_items[slot] = formatted
-                    final_gear.append((slot, formatted))
-
-                key = tuple(sorted(final_gear))
+                key = frozenset(slot_items.items())
                 if key in seen:
+                    skipped += 1
                     continue
                 seen.add(key)
 
-                new_pairs = {}
-                for slot, formatted in slot_items.items():
-                    if slot in active_pairs_orig and formatted != active_pairs_orig[slot]:
-                        new_pairs[slot] = formatted
-                    elif slot not in active_pairs_orig:
-                        new_pairs[slot] = formatted
+                if filter_dominated:
+                    stats, effect_id = compute_stats(
+                        slot_items, item_stats, gem_stats, ench_stats
+                    )
+                else:
+                    stats, effect_id = {}, frozenset()
 
-                if new_pairs:
-                    prefix = f'profileset."Combo {combo_counter}"+='
-                    lines = [f"{prefix}{k}={v}" for k, v in sorted(new_pairs.items())]
-                    desc_parts = [f"{k}={v}" for k, v in sorted(new_pairs.items())]
-                    desc = "; ".join(desc_parts)
-                    out_path = os.path.join(output_dir, f"profile_{combo_counter}.simc")
-                    with open(out_path, 'w', encoding='utf-8') as f:
-                        f.write('\n'.join(lines) + '\n')
-                    descriptions[combo_counter] = desc
-                    combo_counter += 1
+                changes = {
+                    slot: formatted
+                    for slot, formatted in slot_items.items()
+                    if slot not in active_pairs_orig
+                       or formatted != active_pairs_orig[slot]
+                }
+                combo_list.append((stats, effect_id, changes))
 
-    print(f"Generated {combo_counter - 1} changed profiles + base profile 0 in {output_dir}")
+                now = time.time()
+                unique = len(combo_list)
+                if unique % report_every == 0 or (now - last_report) >= 5.0:
+                    print(
+                        f"  Combinations: {unique} unique, {skipped} duplicates skipped, "
+                        f"{considered} considered ({now - gen_t0:.1f}s)",
+                        flush=True,
+                    )
+                    last_report = now
+
+    print(
+        f"Finished combination generation: {len(combo_list)} unique "
+        f"({skipped} duplicates skipped, {considered} considered) "
+        f"in {time.time() - gen_t0:.1f}s",
+        flush=True,
+    )
+
+    # Free the dedup set before the (potentially heavier) filter step.
+    del seen
+
+    if filter_dominated:
+        filtered_changes = filter_combinations(combo_list)
+    else:
+        filtered_changes = [changes for _, _, changes in combo_list]
+
+    # combo_list is no longer needed.
+    del combo_list
+
+    descriptions = {0: "base gear (no changes)"}
+    combo_counter = 1
+    for new_pairs in filtered_changes:
+        if not new_pairs:
+            continue
+        prefix = f'profileset."Combo {combo_counter}"+='
+        lines = [f"{prefix}{k}={v}" for k, v in sorted(new_pairs.items())]
+        desc = "; ".join(f"{k}={v}" for k, v in sorted(new_pairs.items()))
+        out_path = os.path.join(output_dir, f"profile_{combo_counter}.simc")
+        with open(out_path, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(lines) + '\n')
+        descriptions[combo_counter] = desc
+        combo_counter += 1
+
+    print(f"Generated {combo_counter - 1} filtered profiles + base profile 0 in {output_dir}")
     return descriptions
 
 # ---------- Batch Builder ----------
@@ -494,11 +1209,11 @@ def build_batch_simc(iterations_dict, folder_name, output_file='batch.simc',
         lines.append("seed=123456")
     lines.append(f"input={profile_file}")
     lines.append(f"input={options_file}")
-    lines.append(f"active={player_name}")
     lines.append(f'path=".\\{folder_name}"')
 
     for combo_id in sorted(iterations_dict.keys()):
         iters = abs(iterations_dict[combo_id])
+        lines.append(f"active={player_name}")
         lines.append(f'input="profile_{combo_id}.simc"')
         lines.append(f'profileset."Combo {combo_id}"+=iterations={iters}')
 
