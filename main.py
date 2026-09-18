@@ -405,7 +405,9 @@ def _get_item_stats_and_effect_cached(slot, item_str, simc_path):
         "off_hand=,",
         f"{template_slot}={item_str},enchant_id=2503,gem_id=32198/32198/32198/32198",
         "max_time=1",
-        "html=gear_test.html"
+        "html=gear_test.html",
+        "report_details=0",
+        "calculate_scale_factors=0"
     ]
     content = "\n".join(lines) + "\n"
 
@@ -561,14 +563,14 @@ def get_enchant_stats_and_effect(enchant_id, slot, simc_path, effect_identifier=
     print("enchant", enchant_id, slot, stats)
     return stats, effect_identifier
 
-def compute_combo_stats_and_effect(slot_items, item_stats, gem_stats, ench_stats):
+def compute_combo_stats_and_effect(slot_items, item_stats, gem_stats, ench_stats,
+                                   extra_effects=None):
     total_stats = Counter()
     effect_ids = []
 
     for slot, item_str in slot_items.items():
         entry = item_stats.get(slot, {}).get(normalize_item_string(item_str))
         if entry is None:
-            # Fallback (shouldn't happen if pruning kept it) — skip silently.
             continue
         stats, eff = entry
         if stats:
@@ -597,6 +599,9 @@ def compute_combo_stats_and_effect(slot_items, item_stats, gem_stats, ench_stats
                     total_stats.update(e_stats)
                 if e_eff:
                     effect_ids.append(e_eff)
+
+    if extra_effects:
+        effect_ids.extend(extra_effects)
 
     return dict(total_stats), _build_effect_key(effect_ids)
 
@@ -686,30 +691,28 @@ def parse_profile(file_path):
 
     result = {
         "player_name": None,
-        "talents": None,
-        "commented_talents": [],
+        "options": {},
+        "commented_options": {},          # was [] -> dict
         "equipment": {},
-        "commented_equipment": {},
-        "apl_variables": {},
-        "commented_apl_variables": {}
+        "commented_equipment": {}
     }
     for cls in CLASSES:
         if cls in active_pairs:
             result["player_name"] = active_pairs[cls]
             break
-    result["talents"] = active_pairs.get("talents")
-    result["commented_talents"] = commented_pairs.get("talents", [])
     for slot in SLOTS:
         if slot in active_pairs:
             result["equipment"][slot] = active_pairs[slot]
         if slot in commented_pairs:
             result["commented_equipment"][slot] = commented_pairs[slot]
     for key, value in active_pairs.items():
-        if key.startswith("apl_variable."):
-            result["apl_variables"][key[len("apl_variable."):]] = value
+        if key in SLOTS:
+            continue
+        result["options"][key] = value          # was result[options] -> NameError
     for key, values in commented_pairs.items():
-        if key.startswith("apl_variable."):
-            result["commented_apl_variables"][key[len("apl_variable."):]] = values
+        if key in SLOTS:
+            continue
+        result["commented_options"][key] = values
     return result, active_pairs, commented_pairs
 
 def parse_settings(file_path):
@@ -808,6 +811,48 @@ def collect_items_for_slot(slot, profile_data):
         for comment in profile_data["commented_equipment"][slot]:
             items.append(parse_item_string(comment))
     return [it for it in items if it is not None]
+
+def collect_option_values(key, profile_data):
+    """Return all distinct values for an option key (active + commented)."""
+    values = []
+    if key in profile_data["options"]:
+        values.append(profile_data["options"][key])
+    if key in profile_data["commented_options"]:
+        values.extend(profile_data["commented_options"][key])
+    seen = set()
+    unique = []
+    for v in values:
+        if v not in seen:
+            seen.add(v)
+            unique.append(v)
+    return unique
+
+
+def generate_option_combinations(profile_data):
+    """
+    Yield dicts mapping option key -> chosen value for every combination of
+    option values that have 2+ alternatives. Options with a single value are
+    treated as fixed and omitted from the enumeration.
+
+    Only options that the user actually made swappable (by providing commented
+    alternatives) participate.
+    """
+    all_keys = (set(profile_data["options"].keys())
+                | set(profile_data["commented_options"].keys()))
+    keys_with_choices = []
+    for key in sorted(all_keys):
+        values = collect_option_values(key, profile_data)
+        if len(values) > 1:
+            keys_with_choices.append((key, values))
+
+    if not keys_with_choices:
+        yield {}
+        return
+
+    keys = [k for k, _ in keys_with_choices]
+    value_lists = [vals for _, vals in keys_with_choices]
+    for combo in itertools.product(*value_lists):
+        yield dict(zip(keys, combo))
 
 def generate_gear_combinations(profile_data):
     normal_slots = [
@@ -1109,55 +1154,71 @@ def generate_profiles(profile_file, settings_file, output_dir):
     report_every = 1000 if filter_dominated else 25000
 
     for gear_combo in generate_gear_combinations(profile_data):
-        for gem_placement in generate_gem_placements(gear_combo, gems_settings):
-            for enchant_assignment in generate_enchant_combinations(gear_combo, enchants_settings):
-                considered += 1
-                slot_items = {}
-                for slot, item in gear_combo.items():
-                    new_item = {
-                        "base": item["base"],
-                        "fields": item["fields"].copy()
+        for option_combo in generate_option_combinations(profile_data):   # NEW
+            for gem_placement in generate_gem_placements(gear_combo, gems_settings):
+                for enchant_assignment in generate_enchant_combinations(gear_combo, enchants_settings):
+                    considered += 1
+                    slot_items = {}
+                    for slot, item in gear_combo.items():
+                        new_item = {
+                            "base": item["base"],
+                            "fields": item["fields"].copy()
+                        }
+                        num_sockets = get_socket_count(item)
+                        slot_gems = [gem_placement.get((slot, idx))
+                                     for idx in range(num_sockets)]
+                        if any(g is not None for g in slot_gems):
+                            set_gems(new_item, slot_gems)
+                        enchant_spec = enchant_assignment.get(slot)
+                        if enchant_spec is not None:
+                            set_enchant(new_item, enchant_spec["id"])
+                        slot_items[slot] = format_item_string(new_item)
+
+                    # --- Compute which option values actually differ from base.
+                    option_effects = []
+                    option_changes = {}
+                    for opt_key, opt_val in option_combo.items():
+                        if opt_key not in active_pairs_orig or opt_val != active_pairs_orig[opt_key]:
+                            option_effects.append(f"option:{opt_key}={opt_val}")
+                            option_changes[opt_key] = opt_val
+
+                    # Dedup key now covers gear AND options.
+                    key = (
+                        frozenset(slot_items.items()),
+                        frozenset(option_combo.items()),
+                    )
+                    if key in seen:
+                        skipped += 1
+                        continue
+                    seen.add(key)
+
+                    if filter_dominated:
+                        stats, effect_id = compute_stats(
+                            slot_items, item_stats, gem_stats, ench_stats,
+                            extra_effects=option_effects,
+                        )
+                    else:
+                        stats, effect_id = {}, frozenset()
+
+                    changes = {
+                        slot: formatted
+                        for slot, formatted in slot_items.items()
+                        if slot not in active_pairs_orig
+                           or formatted != active_pairs_orig[slot]
                     }
-                    num_sockets = get_socket_count(item)
-                    slot_gems = [gem_placement.get((slot, idx))
-                                 for idx in range(num_sockets)]
-                    if any(g is not None for g in slot_gems):
-                        set_gems(new_item, slot_gems)
-                    enchant_spec = enchant_assignment.get(slot)
-                    if enchant_spec is not None:
-                        set_enchant(new_item, enchant_spec["id"])
-                    slot_items[slot] = format_item_string(new_item)
+                    changes.update(option_changes)
 
-                key = frozenset(slot_items.items())
-                if key in seen:
-                    skipped += 1
-                    continue
-                seen.add(key)
+                    combo_list.append((stats, effect_id, changes))
 
-                if filter_dominated:
-                    stats, effect_id = compute_stats(
-                        slot_items, item_stats, gem_stats, ench_stats
-                    )
-                else:
-                    stats, effect_id = {}, frozenset()
-
-                changes = {
-                    slot: formatted
-                    for slot, formatted in slot_items.items()
-                    if slot not in active_pairs_orig
-                       or formatted != active_pairs_orig[slot]
-                }
-                combo_list.append((stats, effect_id, changes))
-
-                now = time.time()
-                unique = len(combo_list)
-                if unique % report_every == 0 or (now - last_report) >= 5.0:
-                    print(
-                        f"  Combinations: {unique} unique, {skipped} duplicates skipped, "
-                        f"{considered} considered ({now - gen_t0:.1f}s)",
-                        flush=True,
-                    )
-                    last_report = now
+                    now = time.time()
+                    unique = len(combo_list)
+                    if unique % report_every == 0 or (now - last_report) >= 5.0:
+                        print(
+                            f"  Combinations: {unique} unique, {skipped} duplicates skipped, "
+                            f"{considered} considered ({now - gen_t0:.1f}s)",
+                            flush=True,
+                        )
+                        last_report = now
 
     print(
         f"Finished combination generation: {len(combo_list)} unique "
