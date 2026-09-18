@@ -19,12 +19,7 @@ Put the SimC executable next to `main.py`, or set `simc_path` in `settings.json`
 
 ### Gear alternatives
 
-Active `key=value` lines are the base loadout. Any commented line with the same slot (or `talents` / `apl_variable.*`) is an extra option.
-
-Rings, trinkets, and weapons are pooled:
-
-- Rings and trinkets: every unordered pair of distinct item IDs
-- Weapons: each `2_hand`, plus each `main_hand`/`1_hand` with each `off_hand`/`1_hand`
+Active `key=value` lines are the base loadout. Any commented line with the same key is an extra option tha will be used in combination generation.
 
 Duplicate identical loadouts are dropped. Combo `0` is always the unchanged base profile.
 
@@ -60,7 +55,7 @@ Duplicate identical loadouts are dropped. Combo `0` is always the unchanged base
   - `id`: enchant id, can be found on wowhead in the effect of the spell for applying it
   - `effect_identifier`: string for any effect the gem has beyond stats, used for filtering
 
-Gems are placed only in sockets that already exist on the item (`gem_id` in the profile).
+Gems are placed only in sockets that already exist on the item (`gem_id` in the profile), meta gems only in sockets containing an id corresponding to a meta gem.
 
 ## Run
 
